@@ -1,0 +1,119 @@
+[
+  {
+    "scenario_id": "ftx-collapse-btc-drop-2022",
+    "description": "BTC drop during FTX collapse, Nov 8-9 2022. Binance announced FTT liquidation Nov 6 after CoinDesk's Nov 2 Alameda balance sheet expose; mass FTX withdrawals followed; BTC fell below $16,000 (lowest since 2020) as contagion spread. Correct explanation should cite the exchange-crisis news, not the distractor.",
+    "ticker": "BTC-USD",
+    "anomaly": {
+      "price": 16500,
+      "price_direction": "down",
+      "price_z_score": 5.8,
+      "volume_z_score": 7.2
+    },
+    "candidate_news": [
+      {
+        "id": "news-ftx-1",
+        "headline": "Binance to liquidate entire FTT position, citing 'recent revelations'",
+        "summary": "Binance CEO Changpeng Zhao announced the exchange will sell its remaining FTT holdings, worth over $500 million, following reports about Alameda Research's balance sheet being heavily concentrated in FTX's exchange token.",
+        "source": "example-coindesk",
+        "url": "https://example.com/ftx-1",
+        "minutes_before_anomaly": 2880,
+        "scope": "market_wide"
+      },
+      {
+        "id": "news-ftx-2",
+        "headline": "FTX halts customer withdrawals amid liquidity crisis",
+        "summary": "FTX has suspended all crypto withdrawals after seeing an estimated $6 billion in withdrawal requests in 72 hours. Fears of exchange insolvency are driving selloffs across all major crypto assets.",
+        "source": "example-reuters",
+        "url": "https://example.com/ftx-2",
+        "minutes_before_anomaly": 120,
+        "scope": "market_wide"
+      },
+      {
+        "id": "news-distractor-1",
+        "headline": "Bitcoin mining difficulty adjustment scheduled this week",
+        "summary": "The Bitcoin network's regular difficulty adjustment is expected this week, a routine protocol event that occurs approximately every two weeks.",
+        "source": "example-blog",
+        "url": "https://example.com/distractor-1",
+        "minutes_before_anomaly": 1440,
+        "scope": "ticker_specific"
+      }
+    ],
+    "ground_truth": {
+      "accepted_claims": ["exchange_collapse", "exchange_insolvency", "exchange_crisis", "ftx_collapse", "liquidity_crisis", "market_contagion"],
+      "correct_citation_ids": ["news-ftx-2", "news-ftx-1"],
+      "documentation": "Wikipedia: Bankruptcy of FTX; CoinDesk Nov 8 2022 'FTX Token Falls 80%... Contagion Spreads to Bitcoin' - BTC fell to 23-month low as FTX halted withdrawals"
+    }
+  },
+  {
+    "scenario_id": "no-cause-distractor-test",
+    "description": "Deliberate no_clear_cause test: a genuine price/volume anomaly with ONLY irrelevant candidate news available. The correct behavior is claim=no_clear_cause with empty citations - citing either distractor is a failure (forced connection). This tests the agent's honesty under pressure to explain.",
+    "ticker": "ETH-USD",
+    "anomaly": {
+      "price": 2450,
+      "price_direction": "down",
+      "price_z_score": 4.1,
+      "volume_z_score": 3.5
+    },
+    "candidate_news": [
+      {
+        "id": "news-distractor-2",
+        "headline": "Ethereum conference announces next year's venue",
+        "summary": "The annual Ethereum developer conference announced its venue for next year, with organizers expecting record attendance.",
+        "source": "example-blog",
+        "url": "https://example.com/distractor-2",
+        "minutes_before_anomaly": 2000,
+        "scope": "ticker_specific"
+      },
+      {
+        "id": "news-distractor-3",
+        "headline": "Survey: institutional interest in digital assets remains steady",
+        "summary": "A quarterly survey of institutional investors shows crypto allocation intentions unchanged from the previous quarter.",
+        "source": "example-survey",
+        "url": "https://example.com/distractor-3",
+        "minutes_before_anomaly": 3000,
+        "scope": "market_wide"
+      }
+    ],
+    "ground_truth": {
+      "accepted_claims": ["no_clear_cause"],
+      "correct_citation_ids": [],
+      "documentation": "Synthetic scenario - by construction, neither candidate article explains a sharp 4-sigma drop. Tests honest refusal to force a connection."
+    }
+  },
+  {
+    "scenario_id": "sec-etf-approval-btc-2024",
+    "description": "BTC move around the SEC spot Bitcoin ETF approval, Jan 10 2024. A long-anticipated regulatory approval - the correct explanation cites the approval news. Includes a bearish distractor to test that the agent picks the directionally-coherent cause.",
+    "ticker": "BTC-USD",
+    "anomaly": {
+      "price": 47500,
+      "price_direction": "up",
+      "price_z_score": 4.5,
+      "volume_z_score": 6.0
+    },
+    "candidate_news": [
+      {
+        "id": "news-etf-1",
+        "headline": "SEC approves spot Bitcoin ETFs after decade of rejections",
+        "summary": "The U.S. Securities and Exchange Commission approved multiple spot Bitcoin exchange-traded funds, allowing mainstream investors direct exposure to bitcoin through traditional brokerage accounts for the first time.",
+        "source": "example-wsj",
+        "url": "https://example.com/etf-1",
+        "minutes_before_anomaly": 60,
+        "scope": "ticker_specific"
+      },
+      {
+        "id": "news-distractor-4",
+        "headline": "Analyst warns of possible crypto winter extension",
+        "summary": "A market analyst cautioned that macroeconomic headwinds could extend the downturn in digital asset markets through the coming quarters.",
+        "source": "example-analyst",
+        "url": "https://example.com/distractor-4",
+        "minutes_before_anomaly": 4000,
+        "scope": "market_wide"
+      }
+    ],
+    "ground_truth": {
+      "accepted_claims": ["regulatory_approval", "etf_approval", "regulatory_news", "sec_approval"],
+      "correct_citation_ids": ["news-etf-1"],
+      "documentation": "SEC approved 11 spot Bitcoin ETFs on Jan 10, 2024 - widely documented; BTC rallied on institutional access expectations"
+    }
+  }
+]

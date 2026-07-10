@@ -1,5 +1,13 @@
 # Market Anomaly Agent
 
+> **⚠️ Disclaimer: This project is for educational and research purposes only.**
+> It is a study of event-driven architecture, AI agent grounding, and
+> verification techniques — **it is not financial advice, not a trading
+> tool, and not intended to inform investment decisions.** The
+> explanations it generates describe *what happened and possible why* —
+> never what anyone should buy or sell. Crypto assets are volatile and
+> risky; consult a licensed financial advisor for investment decisions.
+
 A free, open, real-time crypto price-anomaly explainer. Detects unusual
 price/volume moves and uses an AI agent to explain *why* — grounded in
 verifiable citations, not free-text guesses.
@@ -136,19 +144,46 @@ and a free-tier cost checklist.
 
 ## What's honestly NOT built yet
 
-- **Eval harness** — replaying historical anomalies against documented
-  real causes to calibrate the confidence weights (currently reasonable
-  starting-point guesses, not tuned against outcome data). Deliberately
-  deferred — a good, real chunk of work on its own.
 - **Real delivery channel** for `fanout-svc` (currently logs only)
 - **Dashboard/UI**
 - **Ticker-sharded scaling** for `detector-svc` beyond a single instance
   (its baseline state is in-memory; Pub/Sub push doesn't guarantee tick
   affinity across instances)
+- **A larger eval dataset** — the harness exists (see below) but ships
+  with only 3 seed scenarios; the aggregate numbers become meaningful
+  around 15-20+. See `eval-data/README.md` for how to grow it.
 - **v2 batch layer**: backtesting the detector against historical data
   to test whether anomalies (especially `no_clear_cause` ones) predict
   mean-reversion or trend-continuation — a separate planned layer, not
   blocking v1
+
+## Eval harness
+
+`src/eval/runEvals.ts` replays documented historical scenarios through
+the REAL pipeline (real Claude call, real grounding verification, real
+confidence scoring — nothing mocked except data sources) and scores
+against a ground-truth answer key (`eval-data/scenarios.json`):
+
+- **claim correctness** — did the explanation match the documented cause?
+- **citation correctness** — did it cite the right articles and *only*
+  the right articles? (citing a distractor alongside a correct article
+  still fails, deliberately)
+- **honest refusal** — for scenarios where no candidate genuinely
+  explains the move, did it say `no_clear_cause` instead of forcing a
+  connection? This is the hardest and most important behavior tested.
+- **confidence calibration** — is composite confidence higher on correct
+  answers than incorrect ones?
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+npx tsc --outDir dist
+node dist/src/eval/runEvals.js
+```
+
+Each scenario is one real Claude call (~$0.01-0.02). See
+`eval-data/README.md` for how to grow the dataset — including harvesting
+real judged cases from your deployed pipeline's Firestore log, which is
+the sustainable long-term source.
 
 ## Known caveats worth stating in any writeup
 
