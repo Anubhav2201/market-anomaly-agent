@@ -5,6 +5,7 @@ import {
   NewsArticleIngested,
   PriceTick,
   ExplanationGenerated,
+  SentimentSnapshotIngested,
 } from "../events/types";
 
 /**
@@ -27,7 +28,7 @@ const client = new Anthropic(); // reads ANTHROPIC_API_KEY from env
 const EXPLAIN_TOOL = {
   name: "submit_explanation",
   description:
-    "Submit a structured explanation for why a price anomaly occurred, citing ONLY the event_ids of candidate NEWS ARTICLES actually provided to you. Price context has no event_id and cannot be cited. Never invent an event_id.",
+    "Submit a structured explanation for why a price anomaly occurred, citing ONLY the event_ids of candidate NEWS ARTICLES or the SENTIMENT SNAPSHOT actually provided to you. Price context has no event_id and cannot be cited. Never invent an event_id.",
   input_schema: {
     type: "object" as const,
     properties: {
@@ -60,10 +61,11 @@ interface CandidateContext {
   anomaly: PriceAnomalyDetected;
   recentTicks: PriceTick[]; // small window of price history for context
   candidateNews: NewsArticleIngested[]; // must be BEFORE anomaly.timestamp
+  sentimentSnapshot?: SentimentSnapshotIngested | null; // optional, cached hourly
 }
 
 function buildPrompt(ctx: CandidateContext): string {
-  const { anomaly, recentTicks, candidateNews } = ctx;
+  const { anomaly, recentTicks, candidateNews, sentimentSnapshot } = ctx;
 
   const tickSummary = recentTicks
     .slice(-10)
@@ -80,6 +82,12 @@ function buildPrompt(ctx: CandidateContext): string {
           .join("\n")
       : "  (no candidate news articles available)";
 
+  const sentimentSummary = sentimentSnapshot
+    ? `  [${sentimentSnapshot.event_id}] Reddit crypto sentiment (cached hourly): ` +
+      `buzz_score=${sentimentSnapshot.buzz_score}/100, sentiment_score=${sentimentSnapshot.sentiment_score.toFixed(2)} ` +
+      `(-1 bearish to +1 bullish), trend=${sentimentSnapshot.trend}, mentions=${sentimentSnapshot.mention_count}`
+    : "  (no sentiment data available)";
+
   return `A price anomaly was detected:
   ticker: ${anomaly.ticker}
   price: ${anomaly.price}
@@ -92,17 +100,23 @@ only - these are NOT citable events, they have no event_id):
 ${tickSummary}
 
 Candidate news articles (all timestamped BEFORE the anomaly) - these ARE
-the only events you may cite. Each is tagged with a scope: ticker_specific
-means it's specifically about ${anomaly.ticker}; market_wide means it's
-broader market/macro news that could plausibly affect many assets at once
+citable. Each is tagged with a scope: ticker_specific means it's
+specifically about ${anomaly.ticker}; market_wide means it's broader
+market/macro news that could plausibly affect many assets at once
 (prefer a ticker_specific citation when one genuinely fits, since it's a
 more direct explanation):
 ${newsSummary}
 
-Using ONLY the event_ids from the candidate news articles listed above
-(never invent an id, never cite the price context above - it has no
-id), explain why this anomaly likely occurred.
-If no candidate news article actually explains it, say so honestly with claim
+Reddit crypto sentiment snapshot (also citable if it's actually relevant
+to explaining this specific anomaly - e.g. a strong sentiment shift with
+no clear news cause might itself be worth citing as the explanation):
+${sentimentSummary}
+
+Using ONLY the event_ids from the candidate news articles or the
+sentiment snapshot listed above (never invent an id, never cite the
+price context above - it has no id), explain why this anomaly likely
+occurred.
+If nothing actually explains it, say so honestly with claim
 "no_clear_cause" and an empty cited_event_ids array - do not fabricate a connection.
 Call the submit_explanation tool with your answer.`;
 }

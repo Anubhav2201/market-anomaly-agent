@@ -116,10 +116,28 @@ export interface AlertReady extends BaseEvent {
   volume_z_score: number;
 }
 
+/**
+ * A cached Reddit crypto sentiment snapshot (via Adanos' free tier).
+ * Fetched at most once per hour per ticker regardless of how many
+ * anomalies occur in that window - the free tier is only 250
+ * requests/month, so per-anomaly fetching would exhaust it almost
+ * immediately. The cached snapshot's event_id is what gets handed to
+ * the agent as a citable candidate, same pattern as news articles.
+ */
+export interface SentimentSnapshotIngested extends BaseEvent {
+  type: "SentimentSnapshotIngested";
+  source: "adanos-reddit-crypto";
+  buzz_score: number; // 0-100
+  sentiment_score: number; // -1 (bearish) to +1 (bullish)
+  trend: "rising" | "falling" | "stable";
+  mention_count: number;
+}
+
 export type DomainEvent =
   | PriceTick
   | PriceAnomalyDetected
   | NewsArticleIngested
   | ExplanationGenerated
   | GroundingVerified
-  | AlertReady;
+  | AlertReady
+  | SentimentSnapshotIngested;

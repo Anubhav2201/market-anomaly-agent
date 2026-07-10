@@ -16,6 +16,7 @@ import express from "express";
 import { fetchRecentNews } from "../../../src/news/newsIngestion";
 import { generateExplanation } from "../../../src/agent/explanationAgent";
 import { FirestoreEventStore } from "../../../src/events/firestoreStore";
+import { SentimentIngestion } from "../../../src/sentiment/sentimentIngestion";
 import {
   PriceAnomalyDetected,
   NewsArticleIngested,
@@ -25,6 +26,7 @@ import { publishEvent, parsePushMessage } from "../../../shared/pubsub";
 const EXPLANATIONS_TOPIC = "explanations";
 
 const store = new FirestoreEventStore();
+const sentimentIngestion = new SentimentIngestion(store);
 const app = express();
 app.use(express.json());
 
@@ -68,6 +70,7 @@ app.post("/pubsub/push", async (req, res) => {
         volume: 0, // not tracked in the embedded context snapshot
       })),
       candidateNews,
+      sentimentSnapshot: await sentimentIngestion.getSnapshot(anomaly.ticker),
     });
 
     await store.append(explanation);

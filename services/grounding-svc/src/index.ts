@@ -28,6 +28,7 @@ import {
   ExplanationGenerated,
   NewsArticleIngested,
   PriceAnomalyDetected,
+  SentimentSnapshotIngested,
 } from "../../../src/events/types";
 import { publishEvent, parsePushMessage } from "../../../shared/pubsub";
 
@@ -78,24 +79,45 @@ app.post("/pubsub/push", async (req, res) => {
     )) as PriceAnomalyDetected | undefined;
 
     const citedArticles: NewsArticleIngested[] = [];
+    let citedSentiment: SentimentSnapshotIngested | null = null;
     for (const id of explanation.cited_event_ids) {
       const event = await store.getById(id);
-      if (event && event.type === "NewsArticleIngested") {
+      if (event?.type === "NewsArticleIngested") {
         citedArticles.push(event);
+      } else if (event?.type === "SentimentSnapshotIngested") {
+        citedSentiment = event;
       }
     }
 
-    const sourceCount = new Set(citedArticles.map((a) => a.source)).size;
+    const sourceCount =
+      new Set(citedArticles.map((a) => a.source)).size +
+      (citedSentiment ? 1 : 0); // sentiment counts as its own independent source
 
-    const sentimentResults = anomaly
-      ? citedArticles.map((a) =>
-          checkSentimentCoherence(a, anomaly.price_direction)
-        )
+    const articleSentimentResults = anomaly
+      ? citedArticles.map((a) => checkSentimentCoherence(a, anomaly.price_direction))
       : [];
+
+    // Direct numeric coherence check for a cited sentiment snapshot -
+    // more precise than the lexicon-based article check since we have
+    // an actual -1..+1 score, not just keyword matching.
+    let sentimentSnapshotCoherent: boolean | null = null;
+    if (citedSentiment && anomaly) {
+      const isBullish = citedSentiment.sentiment_score > 0.15;
+      const isBearish = citedSentiment.sentiment_score < -0.15;
+      sentimentSnapshotCoherent =
+        (!isBullish && !isBearish) || // neutral can't contradict
+        (isBullish && anomaly.price_direction === "up") ||
+        (isBearish && anomaly.price_direction === "down");
+    }
+
+    const allCoherenceSignals = [
+      ...articleSentimentResults.map((r) => r.isCoherent),
+      ...(sentimentSnapshotCoherent !== null ? [sentimentSnapshotCoherent] : []),
+    ];
     const sentimentCoherent =
-      sentimentResults.length === 0
+      allCoherenceSignals.length === 0
         ? null
-        : sentimentResults.every((r) => r.isCoherent);
+        : allCoherenceSignals.every((c) => c);
 
     const avgProximity =
       citedArticles.length === 0 || !anomaly
@@ -121,12 +143,17 @@ app.post("/pubsub/push", async (req, res) => {
       explanation.candidate_news_count
     );
 
+    const semanticCheckContent = [
+      ...citedArticles.map((a) => `${a.headline}: ${a.summary}`),
+      ...(citedSentiment
+        ? [
+            `Reddit sentiment: score=${citedSentiment.sentiment_score.toFixed(2)} (-1 bearish to +1 bullish), trend=${citedSentiment.trend}, buzz=${citedSentiment.buzz_score}/100`,
+          ]
+        : []),
+    ];
     const semanticSupport =
-      citedArticles.length > 0
-        ? await verifyClaimSupportedByContent(
-            explanation.claim,
-            citedArticles.map((a) => `${a.headline}: ${a.summary}`)
-          )
+      semanticCheckContent.length > 0
+        ? await verifyClaimSupportedByContent(explanation.claim, semanticCheckContent)
         : null;
 
     const confidence = computeConfidence({
