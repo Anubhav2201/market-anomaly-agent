@@ -14,6 +14,7 @@
  * news -> explanation -> verdict, all cross-referenced by event_id.
  */
 import express from "express";
+import { v4 as uuidv4 } from "uuid";
 import { FirestoreEventStore } from "../../../src/events/firestoreStore";
 import { AsyncGroundingVerifier } from "../../../src/agent/groundingVerifierAsync";
 import { NewsVolumeTracker } from "../../../src/signals/newsVolumeTracker";
@@ -28,7 +29,9 @@ import {
   NewsArticleIngested,
   PriceAnomalyDetected,
 } from "../../../src/events/types";
-import { parsePushMessage } from "../../../shared/pubsub";
+import { publishEvent, parsePushMessage } from "../../../shared/pubsub";
+
+const ALERTS_TOPIC = "alerts";
 
 const store = new FirestoreEventStore();
 const verifier = new AsyncGroundingVerifier(store);
@@ -140,6 +143,29 @@ app.post("/pubsub/push", async (req, res) => {
       `[grounding-svc] VERIFIED: claim="${explanation.claim}" composite_confidence=${confidence.score.toFixed(2)}`,
       confidence.breakdown
     );
+
+    if (anomaly) {
+      const alert = {
+        type: "AlertReady" as const,
+        event_id: uuidv4(),
+        ticker: explanation.ticker,
+        timestamp: Date.now(),
+        anomaly_event_id: explanation.anomaly_event_id,
+        explanation_event_id: explanation.event_id,
+        claim: explanation.claim,
+        human_summary: explanation.human_summary,
+        structurally_grounded: verdict.structurally_grounded,
+        composite_confidence: confidence.score,
+        price_z_score: anomaly.price_z_score,
+        volume_z_score: anomaly.volume_z_score,
+      };
+      await store.append(alert);
+      await publishEvent(ALERTS_TOPIC, alert);
+    } else {
+      console.warn(
+        `[grounding-svc] anomaly ${explanation.anomaly_event_id} not found - skipping alert fan-out`
+      );
+    }
 
     processedCount++;
     res.status(200).send();

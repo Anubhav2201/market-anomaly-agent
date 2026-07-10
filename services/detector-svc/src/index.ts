@@ -19,6 +19,7 @@
 import express from "express";
 import { AnomalyDetector } from "../../../src/detector/anomalyDetector";
 import { FirestoreEventStore } from "../../../src/events/firestoreStore";
+import { SubscriptionsStore } from "../../../src/subscriptions/subscriptionsStore";
 import { PriceTick } from "../../../src/events/types";
 import { publishEvent, parsePushMessage } from "../../../shared/pubsub";
 
@@ -31,6 +32,36 @@ const detector = new AnomalyDetector({
   warmupTicks: 30,
 });
 const store = new FirestoreEventStore();
+const subscriptionsStore = new SubscriptionsStore();
+
+// Tickers we know about (seen at least one tick) - used to know which
+// tickers to pull threshold overrides for, without guessing in advance.
+const knownTickers = new Set<string>();
+
+/**
+ * Detect once per ticker at the MOST SENSITIVE threshold across all
+ * subscribers - this is what lets one detector instance serve every
+ * subscriber's sensitivity preference without running a detector per
+ * subscriber. Refreshed on a timer (SubscriptionsStore caches this
+ * internally too) rather than queried per tick, to stay well within
+ * Firestore's free tier.
+ */
+async function refreshThresholds() {
+  for (const ticker of knownTickers) {
+    try {
+      const thresholds = await subscriptionsStore.getMinThresholdsForTicker(ticker);
+      detector.setTickerThresholds(ticker, {
+        priceZThreshold: thresholds.price_z_threshold,
+        volumeZThreshold: thresholds.volume_z_threshold,
+        debounceMs: thresholds.debounce_ms,
+        warmupTicks: 30,
+      });
+    } catch (err) {
+      console.error(`[detector-svc] failed to refresh thresholds for ${ticker}:`, err);
+    }
+  }
+}
+setInterval(refreshThresholds, 60 * 1000); // check every minute (cache inside the store limits actual Firestore reads)
 
 const app = express();
 app.use(express.json());
@@ -51,6 +82,7 @@ app.post("/pubsub/push", async (req, res) => {
   }
 
   tickCount++;
+  knownTickers.add(tick.ticker);
   if (tickCount % 100 === 0) {
     const elapsedSec = (Date.now() - startedAt) / 1000;
     console.log(

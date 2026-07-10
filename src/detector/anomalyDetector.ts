@@ -105,6 +105,23 @@ export class AnomalyDetector {
     new Map();
   private readonly bufferSize = 20;
 
+  /**
+   * Per-ticker threshold overrides, set externally (e.g. by
+   * detector-svc pulling the most-sensitive subscriber thresholds from
+   * SubscriptionsStore). Falls back to this.config (the constructor
+   * defaults) if no override is set for a given ticker - this preserves
+   * the original zero-subscriber behavior exactly.
+   */
+  private tickerOverrides: Map<string, AnomalyDetectorConfig> = new Map();
+
+  setTickerThresholds(ticker: string, overrides: AnomalyDetectorConfig): void {
+    this.tickerOverrides.set(ticker, overrides);
+  }
+
+  private configFor(ticker: string): AnomalyDetectorConfig {
+    return this.tickerOverrides.get(ticker) ?? this.config;
+  }
+
   constructor(config: Partial<AnomalyDetectorConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
   }
@@ -137,13 +154,15 @@ export class AnomalyDetector {
 
     // Don't trigger until we've seen enough ticks to trust the baseline,
     // and don't trigger on the very first tick (no prior baseline at all).
-    if (count < this.config.warmupTicks) {
+    const cfg = this.configFor(tick.ticker);
+
+    if (count < cfg.warmupTicks) {
       return null;
     }
 
     const combinedTrigger =
-      priceZ >= this.config.priceZThreshold &&
-      volumeZ >= this.config.volumeZThreshold;
+      priceZ >= cfg.priceZThreshold &&
+      volumeZ >= cfg.volumeZThreshold;
 
     if (!combinedTrigger) {
       return null;
@@ -151,7 +170,7 @@ export class AnomalyDetector {
 
     // Debounce: suppress repeat triggers for this ticker within the window.
     const last = this.lastTriggerAt.get(tick.ticker) ?? 0;
-    if (tick.timestamp - last < this.config.debounceMs) {
+    if (tick.timestamp - last < cfg.debounceMs) {
       return null;
     }
     this.lastTriggerAt.set(tick.ticker, tick.timestamp);

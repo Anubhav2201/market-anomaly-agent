@@ -98,9 +98,28 @@ export interface GroundingVerified extends BaseEvent {
   failure_reason?: string;
 }
 
+/**
+ * The final output of the pipeline - published by grounding-svc once
+ * structural verification and confidence scoring are both done.
+ * fanout-svc consumes this and decides which subscribers actually
+ * receive it, filtering against each subscriber's own thresholds.
+ */
+export interface AlertReady extends BaseEvent {
+  type: "AlertReady";
+  anomaly_event_id: EventId;
+  explanation_event_id: EventId;
+  claim: string;
+  human_summary: string;
+  structurally_grounded: boolean;
+  composite_confidence: number;
+  price_z_score: number;
+  volume_z_score: number;
+}
+
 export type DomainEvent =
   | PriceTick
   | PriceAnomalyDetected
   | NewsArticleIngested
   | ExplanationGenerated
-  | GroundingVerified;
+  | GroundingVerified
+  | AlertReady;
