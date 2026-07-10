@@ -1,0 +1,152 @@
+/**
+ * grounding-svc: receives ExplanationGenerated events via a Pub/Sub PUSH
+ * subscription on the "explanations" topic. For each one:
+ *   1. runs structural grounding verification (real id? causally prior?)
+ *      against durable Firestore storage
+ *   2. gathers the independently-computed confidence signals (news
+ *      volume spike, sentiment coherence, source diversity, temporal
+ *      proximity, narrow semantic check)
+ *   3. computes the composite confidence score
+ *   4. persists the final GroundingVerified verdict to Firestore
+ *
+ * This is the end of the pipeline - the durable event log in Firestore
+ * at this point contains the full auditable trail: anomaly -> candidate
+ * news -> explanation -> verdict, all cross-referenced by event_id.
+ */
+import express from "express";
+import { FirestoreEventStore } from "../../../src/events/firestoreStore";
+import { AsyncGroundingVerifier } from "../../../src/agent/groundingVerifierAsync";
+import { NewsVolumeTracker } from "../../../src/signals/newsVolumeTracker";
+import { checkSentimentCoherence } from "../../../src/signals/sentimentCoherence";
+import { verifyClaimSupportedByContent } from "../../../src/signals/semanticVerifier";
+import {
+  computeConfidence,
+  temporalProximityScore,
+} from "../../../src/signals/confidenceScorer";
+import {
+  ExplanationGenerated,
+  NewsArticleIngested,
+  PriceAnomalyDetected,
+} from "../../../src/events/types";
+import { parsePushMessage } from "../../../shared/pubsub";
+
+const store = new FirestoreEventStore();
+const verifier = new AsyncGroundingVerifier(store);
+// NOTE: news volume baseline resets on cold start/redeploy since it's
+// in-memory - acceptable for now (it re-warms after a few anomalies),
+// but worth persisting to Firestore in a later pass if this matters.
+const newsVolumeTracker = new NewsVolumeTracker();
+
+const app = express();
+app.use(express.json());
+
+let processedCount = 0;
+
+app.post("/pubsub/push", async (req, res) => {
+  let explanation: ExplanationGenerated;
+  try {
+    explanation = parsePushMessage(req.body) as ExplanationGenerated;
+  } catch (err) {
+    console.error("[grounding-svc] failed to parse push message:", err);
+    res.status(200).send();
+    return;
+  }
+
+  try {
+    console.log(
+      `[grounding-svc] verifying explanation for ${explanation.ticker}, claim="${explanation.claim}"`
+    );
+
+    const verdict = await verifier.verifyStructural(explanation);
+    await store.append(verdict);
+
+    if (!verdict.structurally_grounded) {
+      console.log(
+        `[grounding-svc] REJECTED: ${verdict.failure_reason}`
+      );
+      processedCount++;
+      res.status(200).send();
+      return;
+    }
+
+    // Structural check passed - now gather the confidence signals.
+    const anomaly = (await store.getById(
+      explanation.anomaly_event_id
+    )) as PriceAnomalyDetected | undefined;
+
+    const citedArticles: NewsArticleIngested[] = [];
+    for (const id of explanation.cited_event_ids) {
+      const event = await store.getById(id);
+      if (event && event.type === "NewsArticleIngested") {
+        citedArticles.push(event);
+      }
+    }
+
+    const sourceCount = new Set(citedArticles.map((a) => a.source)).size;
+
+    const sentimentResults = anomaly
+      ? citedArticles.map((a) =>
+          checkSentimentCoherence(a, anomaly.price_direction)
+        )
+      : [];
+    const sentimentCoherent =
+      sentimentResults.length === 0
+        ? null
+        : sentimentResults.every((r) => r.isCoherent);
+
+    const avgProximity =
+      citedArticles.length === 0 || !anomaly
+        ? 0
+        : citedArticles.reduce(
+            (sum, a) => sum + temporalProximityScore(a.timestamp, anomaly.timestamp),
+            0
+          ) / citedArticles.length;
+
+    // News volume signal - uses the REAL count of news fetched by
+    // agent-svc at the time (passed through the event), not an
+    // approximation from how many the model chose to cite. This keeps
+    // "how much news exists" and "how much the model cited" as
+    // properly separate signals.
+    const volumeResult = newsVolumeTracker.record(
+      explanation.ticker,
+      explanation.candidate_news_count
+    );
+
+    const semanticSupport =
+      citedArticles.length > 0
+        ? await verifyClaimSupportedByContent(
+            explanation.claim,
+            citedArticles.map((a) => `${a.headline}: ${a.summary}`)
+          )
+        : null;
+
+    const confidence = computeConfidence({
+      structurallyGrounded: verdict.structurally_grounded,
+      newsVolumeSpike: volumeResult.isSpike,
+      sentimentCoherent,
+      sourceCount,
+      proximityScore: avgProximity,
+      semanticSupport,
+    });
+
+    console.log(
+      `[grounding-svc] VERIFIED: claim="${explanation.claim}" composite_confidence=${confidence.score.toFixed(2)}`,
+      confidence.breakdown
+    );
+
+    processedCount++;
+    res.status(200).send();
+  } catch (err) {
+    console.error("[grounding-svc] processing error:", err);
+    res.status(500).send(); // nack - retry on transient failure
+  }
+});
+
+app.get("/health", (req, res) => {
+  res.json({ status: "ok", processedCount });
+});
+
+const port = process.env.PORT || 8080;
+app.listen(port, () => {
+  console.log(`[grounding-svc] listening on :${port}`);
+});
