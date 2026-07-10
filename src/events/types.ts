@@ -51,6 +51,18 @@ export interface NewsArticleIngested extends BaseEvent {
   summary: string;
   source: string;
   url: string;
+  /**
+   * Tagged at ingestion time (not per-anomaly), so the classification
+   * cost is paid once per article, not once per anomaly it might later
+   * be considered for:
+   *   - ticker_specific: mentions/is about THIS ticker specifically
+   *   - market_wide: broader market/macro news (Fed, SEC, "crypto market")
+   *     that could plausibly explain moves across many tickers at once
+   *   - unrelated: mentions the ticker only in passing, not substantively
+   * Candidate pool per anomaly = ticker_specific(that ticker) + all
+   * market_wide articles; unrelated articles are filtered out entirely.
+   */
+  scope: "ticker_specific" | "market_wide" | "unrelated";
 }
 
 /**

@@ -75,7 +75,7 @@ function buildPrompt(ctx: CandidateContext): string {
       ? candidateNews
           .map(
             (n) =>
-              `  [${n.event_id}] t=${n.timestamp} "${n.headline}" (${n.source}): ${n.summary}`
+              `  [${n.event_id}] t=${n.timestamp} scope=${n.scope} "${n.headline}" (${n.source}): ${n.summary}`
           )
           .join("\n")
       : "  (no candidate news articles available)";
@@ -92,7 +92,11 @@ only - these are NOT citable events, they have no event_id):
 ${tickSummary}
 
 Candidate news articles (all timestamped BEFORE the anomaly) - these ARE
-the only events you may cite:
+the only events you may cite. Each is tagged with a scope: ticker_specific
+means it's specifically about ${anomaly.ticker}; market_wide means it's
+broader market/macro news that could plausibly affect many assets at once
+(prefer a ticker_specific citation when one genuinely fits, since it's a
+more direct explanation):
 ${newsSummary}
 
 Using ONLY the event_ids from the candidate news articles listed above

@@ -53,6 +53,7 @@ const newsEvent: NewsArticleIngested = {
     "A major regulator announced stricter custody requirements for exchanges, effective immediately.",
   source: "example-news-feed",
   url: "https://example.com/news/123",
+  scope: "ticker_specific",
 };
 store.append(newsEvent);
 console.log(`Ingested news event_id=${newsEvent.event_id}`);
@@ -102,6 +103,7 @@ const futureNews: NewsArticleIngested = {
   summary: "Retrospective analysis of the earlier price action.",
   source: "example-news-feed",
   url: "https://example.com/news/124",
+  scope: "ticker_specific",
 };
 store.append(futureNews);
 

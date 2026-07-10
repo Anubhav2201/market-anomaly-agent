@@ -13,6 +13,14 @@ export interface ConfidenceInputs {
   sourceCount: number; // distinct sources among cited articles
   proximityScore: number; // 0-1, 1 = very close in time, decays with distance
   semanticSupport: boolean | null; // null = check skipped (no GROQ_API_KEY etc.)
+  /**
+   * Fraction of cited articles that are ticker_specific (vs market_wide).
+   * 1.0 = all citations are directly about this ticker (strongest,
+   * most direct explanation); 0.0 = all citations are market_wide
+   * (plausible but less direct - the move could be explained by the
+   * macro event OR by something ticker-specific we didn't catch).
+   */
+  tickerSpecificFraction: number;
 }
 
 export interface ConfidenceResult {
@@ -31,25 +39,27 @@ export function computeConfidence(inputs: ConfidenceInputs): ConfidenceResult {
 
   const breakdown: Record<string, number> = {};
 
-  // Weighted combination. Weights are a starting point, not tuned against
-  // real data yet - this is exactly what your eval harness (replaying
-  // historical anomalies against documented real causes) should
-  // calibrate over time.
-  breakdown.news_volume_spike = inputs.newsVolumeSpike ? 0.25 : 0.05;
+  // Weighted combination, rebalanced to include scope specificity.
+  // Weights are a starting point, not tuned against real data yet -
+  // this is exactly what your eval harness (replaying historical
+  // anomalies against documented real causes) should calibrate over
+  // time.
+  breakdown.news_volume_spike = inputs.newsVolumeSpike ? 0.2 : 0.04;
   breakdown.sentiment_coherence =
     inputs.sentimentCoherent === null
-      ? 0.1 // unknown - small neutral credit, not a penalty
+      ? 0.08 // unknown - small neutral credit, not a penalty
       : inputs.sentimentCoherent
-        ? 0.2
+        ? 0.15
         : 0.0; // directional contradiction - real penalty
-  breakdown.source_diversity = Math.min(inputs.sourceCount / 3, 1) * 0.2;
+  breakdown.source_diversity = Math.min(inputs.sourceCount / 3, 1) * 0.15;
   breakdown.temporal_proximity = inputs.proximityScore * 0.15;
   breakdown.semantic_support =
     inputs.semanticSupport === null
-      ? 0.1 // check skipped - small neutral credit
+      ? 0.08 // check skipped - small neutral credit
       : inputs.semanticSupport
-        ? 0.2
+        ? 0.15
         : 0.0; // model actively said the content doesn't support the claim
+  breakdown.scope_specificity = inputs.tickerSpecificFraction * 0.15;
 
   const score = Object.values(breakdown).reduce((a, b) => a + b, 0);
   return { score: Math.min(score, 1), breakdown };

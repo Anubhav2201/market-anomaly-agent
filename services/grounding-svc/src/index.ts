@@ -102,6 +102,12 @@ app.post("/pubsub/push", async (req, res) => {
             0
           ) / citedArticles.length;
 
+    const tickerSpecificFraction =
+      citedArticles.length === 0
+        ? 0
+        : citedArticles.filter((a) => a.scope === "ticker_specific").length /
+          citedArticles.length;
+
     // News volume signal - uses the REAL count of news fetched by
     // agent-svc at the time (passed through the event), not an
     // approximation from how many the model chose to cite. This keeps
@@ -127,6 +133,7 @@ app.post("/pubsub/push", async (req, res) => {
       sourceCount,
       proximityScore: avgProximity,
       semanticSupport,
+      tickerSpecificFraction,
     });
 
     console.log(

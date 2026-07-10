@@ -109,6 +109,12 @@ async function handleAnomaly(anomaly: PriceAnomalyDetected) {
             0
           ) / citedArticles.length;
 
+    const tickerSpecificFraction =
+      citedArticles.length === 0
+        ? 0
+        : citedArticles.filter((a) => a.scope === "ticker_specific").length /
+          citedArticles.length;
+
     // Narrow, cheap free-model semantic check - only runs if GROQ_API_KEY
     // is set; otherwise gracefully returns null (skipped, not failed).
     const semanticSupport =
@@ -126,6 +132,7 @@ async function handleAnomaly(anomaly: PriceAnomalyDetected) {
       sourceCount,
       proximityScore: avgProximity,
       semanticSupport,
+      tickerSpecificFraction,
     });
 
     console.log(`   claim: ${explanation.claim}`);

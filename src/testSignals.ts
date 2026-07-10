@@ -37,6 +37,7 @@ const bearishArticle: NewsArticleIngested = {
   summary: "Fears of a ban grow after the exploit.",
   source: "test-source",
   url: "https://example.com",
+  scope: "ticker_specific",
 };
 const coherentCheck = checkSentimentCoherence(bearishArticle, "down");
 console.log(
@@ -72,6 +73,7 @@ const goodConfidence = computeConfidence({
   sourceCount: 3,
   proximityScore: 0.9,
   semanticSupport: true,
+  tickerSpecificFraction: 1.0,
 });
 console.log(`  strong signals: score=${goodConfidence.score.toFixed(2)}`, goodConfidence.breakdown);
 
@@ -82,6 +84,7 @@ const weakConfidence = computeConfidence({
   sourceCount: 1,
   proximityScore: 0.1,
   semanticSupport: false,
+  tickerSpecificFraction: 0.0,
 });
 console.log(`  weak/contradictory signals: score=${weakConfidence.score.toFixed(2)}`, weakConfidence.breakdown);
 
@@ -92,6 +95,7 @@ const gatedConfidence = computeConfidence({
   sourceCount: 3,
   proximityScore: 1,
   semanticSupport: true,
+  tickerSpecificFraction: 1.0,
 });
 console.log(`  structural gate failed (should be 0): score=${gatedConfidence.score.toFixed(2)}`);
 if (gatedConfidence.score !== 0) {
