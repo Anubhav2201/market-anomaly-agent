@@ -62,6 +62,32 @@ interface CandidateContext {
   recentTicks: PriceTick[]; // small window of price history for context
   candidateNews: NewsArticleIngested[]; // must be BEFORE anomaly.timestamp
   sentimentSnapshot?: SentimentSnapshotIngested | null; // optional, cached hourly
+  /**
+   * Feedback from previously REJECTED attempts on this same anomaly (used
+   * by the bounded retry loop in agent-svc for "large" tier anomalies).
+   * Each entry is the list of rejection reasons from one failed attempt,
+   * in order. Empty/undefined on the first attempt. This is what makes
+   * the loop Observe -> Decide -> retry rather than a blind resend of the
+   * same prompt.
+   */
+  priorRejections?: string[][];
+}
+
+function buildFeedbackSection(priorRejections?: string[][]): string {
+  if (!priorRejections || priorRejections.length === 0) return "";
+  const attempts = priorRejections
+    .map(
+      (reasons, i) =>
+        `Attempt ${i + 1} was REJECTED for:\n` + reasons.map((r) => `  - ${r}`).join("\n")
+    )
+    .join("\n");
+  return `\nIMPORTANT - this anomaly has already been attempted and rejected ${priorRejections.length} time(s):
+${attempts}
+
+Do not repeat the same mistake. If you cannot produce a citation that avoids
+these specific problems, respond honestly with claim "no_clear_cause" and an
+empty cited_event_ids array rather than repeating a rejected citation.
+`;
 }
 
 function buildPrompt(ctx: CandidateContext): string {
@@ -111,7 +137,7 @@ Reddit crypto sentiment snapshot (also citable if it's actually relevant
 to explaining this specific anomaly - e.g. a strong sentiment shift with
 no clear news cause might itself be worth citing as the explanation):
 ${sentimentSummary}
-
+${buildFeedbackSection(ctx.priorRejections)}
 Using ONLY the event_ids from the candidate news articles or the
 sentiment snapshot listed above (never invent an id, never cite the
 price context above - it has no id), explain why this anomaly likely
