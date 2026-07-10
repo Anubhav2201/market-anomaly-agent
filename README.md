@@ -1,0 +1,176 @@
+# Market Anomaly Agent
+
+A free, open, real-time crypto price-anomaly explainer. Detects unusual
+price/volume moves and uses an AI agent to explain *why* — grounded in
+verifiable citations, not free-text guesses.
+
+## Why this exists
+
+Most "AI explains market moves" products (e.g. Robinhood's Cortex
+Digests) are paywalled and closed. This is the same idea, built free and
+open, with an explicit focus on making the AI's explanation *verifiable*
+rather than just plausible-sounding — see "Grounding architecture" below.
+
+## Architecture
+
+```
+ingestion-svc (Coinbase WS, always-on, min-instances=1)
+   --publishes--> [price-ticks topic]
+       --push--> detector-svc (anomaly detection, stateful, max-instances=1)
+           --publishes--> [anomalies topic]
+               --push--> agent-svc (news + sentiment fetch, Claude call, stateless)
+                   --publishes--> [explanations topic]
+                       --push--> grounding-svc (verification + confidence scoring)
+                           --publishes--> [alerts topic]
+                               --push--> fanout-svc (per-subscriber filtering)
+                           --writes--> Firestore (durable event log)
+```
+
+Five independently-deployable Cloud Run services, sharing a durable
+Firestore event store, communicating via Pub/Sub. See `DEPLOYMENT.md`
+for the full `gcloud` deployment guide.
+
+There's also a **local, no-infra path** (`src/live.ts`, `src/demo.ts`)
+for development and testing without deploying anything — see "Local
+development" below.
+
+## Grounding architecture (the core idea)
+
+The agent's output is NOT free text. It's a structured claim citing
+specific `event_id`s from real, stored events (news articles, sentiment
+snapshots). Verification is then mostly deterministic, not another LLM
+judging the first LLM:
+
+1. **Existence check**: does every cited `event_id` actually exist in
+   the store? (catches fabricated citations, for free — no LLM call)
+2. **Causality check**: does every cited event's timestamp precede the
+   anomaly it's explaining? (catches "citing the future" — a real bug
+   class, not just hallucination)
+3. **Narrow semantic check** (optional, the one piece that still uses a
+   model): does the cited content actually support the specific claim?
+   Scoped small (one claim + its own citations, not the whole
+   explanation) and routed to a free-tier model (Groq), not Claude.
+
+On top of structural grounding, a **composite confidence score** is
+computed from independently-verifiable signals (never the model's bare
+self-reported confidence):
+- News-volume spike (is there unusually more news than normal for this
+  ticker right now?)
+- Sentiment-direction coherence (does cited sentiment/news direction
+  match the observed price direction?)
+- Source diversity (how many independent sources corroborate this?)
+- Temporal proximity (how close in time was the citation to the
+  anomaly?)
+- Scope specificity (is the citation about this ticker specifically, or
+  broader market-wide news?)
+- The narrow semantic check above
+
+**A failed structural check hard-gates confidence to exactly 0**,
+regardless of how good the other signals look.
+
+## Candidate sources for citations
+
+1. **News** (`src/news/`) — cryptocurrency.cv, free, tagged at ingestion
+   time as `ticker_specific` / `market_wide` / `unrelated` (unrelated is
+   filtered out entirely). Fetched from both a ticker-scoped endpoint
+   and the general/breaking feed, so market-wide events that don't name
+   the ticker aren't missed.
+2. **Social sentiment** (`src/sentiment/`) — Reddit crypto sentiment via
+   Adanos' free tier (250 requests/month total), cached **hourly per
+   ticker in Firestore** (not in-memory — agent-svc can run multiple
+   instances, so an in-memory cache would let each burn through the
+   shared quota independently).
+
+Both are citable; both go through the same existence/causality checks —
+no special-casing per source type.
+
+## Detection: adaptive, not fixed-threshold
+
+`src/detector/anomalyDetector.ts` uses an EWMA-based rolling baseline
+per ticker (not a fixed % threshold), MAD (median-ish absolute
+deviation) instead of raw stddev so a single huge move doesn't numb
+future detection, combined price+volume triggering, and a debounce
+window.
+
+## Subscriptions & fan-out
+
+Design principle: **detect once per ticker at the most sensitive
+threshold across all subscribers, then fan out per-subscriber** — not
+one detector instance per subscriber.
+
+- `src/subscriptions/` — Firestore-backed subscription records
+  (`userId` + `ticker` + their own price/volume/debounce thresholds).
+  `getMinThresholdsForTicker()` caches in-memory, refreshed every 5 min
+  (not queried per-tick — stays within Firestore free tier).
+- `detector-svc` pulls the min (most sensitive) threshold per known
+  ticker and configures itself to never miss an anomaly any subscriber
+  cares about.
+- `fanout-svc` then filters the single detected anomaly against each
+  individual subscriber's own (possibly less sensitive) threshold and
+  enforces per-subscriber debounce, independent of the detection-level
+  debounce.
+- **Delivery is stubbed** — `fanout-svc` logs who would receive an
+  alert; wiring real email/push (SendGrid, FCM) is an isolated next step
+  that plugs in right there.
+
+## Local development (no GCP needed)
+
+```bash
+npm install
+cp .env.example .env   # fill in ANTHROPIC_API_KEY at minimum
+npx tsc --outDir dist
+
+node dist/src/demo.js          # synthetic replay - proves grounding logic, no network needed
+node dist/src/testSignals.js   # signal sanity tests - no network needed
+node dist/src/live.js          # full live pipeline: Coinbase -> detect -> explain -> verify
+```
+
+`live.ts` uses the in-memory `EventStore` (`src/events/store.ts`), not
+Firestore — good for local iteration without any GCP setup at all.
+
+## Deploying to GCP
+
+See `DEPLOYMENT.md` for the complete guide: creating Pub/Sub topics,
+deploying all five services, wiring push subscriptions with proper IAM,
+and a free-tier cost checklist.
+
+## What's honestly NOT built yet
+
+- **Eval harness** — replaying historical anomalies against documented
+  real causes to calibrate the confidence weights (currently reasonable
+  starting-point guesses, not tuned against outcome data). Deliberately
+  deferred — a good, real chunk of work on its own.
+- **Real delivery channel** for `fanout-svc` (currently logs only)
+- **Dashboard/UI**
+- **Ticker-sharded scaling** for `detector-svc` beyond a single instance
+  (its baseline state is in-memory; Pub/Sub push doesn't guarantee tick
+  affinity across instances)
+- **v2 batch layer**: backtesting the detector against historical data
+  to test whether anomalies (especially `no_clear_cause` ones) predict
+  mean-reversion or trend-continuation — a separate planned layer, not
+  blocking v1
+
+## Known caveats worth stating in any writeup
+
+- **Data source scope**: Coinbase is a single (deep, US-regulated)
+  exchange, not a global crypto aggregate. Chosen over Binance.US
+  because it's a single unified entity (no US/global split, no geo-block
+  451s) with meaningfully deeper liquidity.
+- **News/sentiment API schemas are built from published docs, not
+  verified against live responses** (this dev environment has no
+  network route to cryptocurrency.cv or api.adanos.org) — verify field
+  names against real responses before relying on this in production.
+- **Grounding proves citations are real and causally prior — not that
+  they're the true cause.** A cited article can exist, predate the
+  anomaly, and still not be the actual reason for the move. This is a
+  known, documented limitation shared by every system in this space
+  (Robinhood's own Cortex docs describe "guardrails for factual
+  consistency," not causal-attribution guarantees). The confidence
+  signals reduce this risk but don't eliminate it — the eval harness is
+  what would measure it properly.
+
+## Git history
+
+This project's commit history is intentionally kept meaningful (each
+commit is one real feature/fix), not squashed — see `git log` for the
+full story of how this was built incrementally.
