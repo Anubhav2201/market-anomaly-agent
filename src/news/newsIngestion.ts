@@ -65,17 +65,24 @@ function parseArticle(
   const timestamp = new Date(raw.publishedDate).getTime();
   const validTimestamp = Number.isFinite(timestamp) ? timestamp : Date.now();
 
-  // Tiingo's own tickers[] tagging is a stronger signal than our text
-  // heuristic when it's available - if Tiingo itself tagged this
-  // article with our exact ticker, trust that over the lexicon
-  // classifier's guess. Otherwise fall back to classifyNewsScope
-  // (headline/summary text match) exactly as before.
+  // NOTE: originally this trusted Tiingo's tickers[] tagging outright
+  // whenever it matched (see ADR-017) - live testing (ARB-USD, see
+  // DECISIONS.md ADR-021) showed this can misfire for short/ambiguous
+  // symbols. Several completely unrelated articles (World Cup Spanish
+  // broadcasts, Disney+ pricing, Netflix catalog changes) came back
+  // tagged with "arb" in Tiingo's own tickers[] array despite having
+  // zero textual connection to Arbitrum. Now requiring BOTH signals to
+  // agree: Tiingo's tag is trusted only when our own text classifier
+  // also doesn't think the article is unrelated - this correctly
+  // filters the false-positive tagging noise (none of that noise
+  // mentions "arb"/the ticker anywhere in its own text) while still
+  // accepting genuinely on-topic articles Tiingo tagged correctly.
   const taggedByTiingo = raw.tickers?.some(
     (t) => t.toLowerCase() === tickerBaseSymbol.toLowerCase(),
   );
-  const scope = taggedByTiingo
-    ? "ticker_specific"
-    : classifyNewsScope(raw.title, summary, tickerBaseSymbol);
+  const textScope = classifyNewsScope(raw.title, summary, tickerBaseSymbol);
+  const scope =
+    taggedByTiingo && textScope !== "unrelated" ? "ticker_specific" : textScope;
 
   if (scope === "unrelated") return null; // filtered out at ingestion time
 
@@ -124,8 +131,21 @@ async function fetchFromEndpoint(
 
 /**
  * Fetch recent, scope-tagged news relevant to a ticker. Combines a
- * ticker-scoped query with a general/latest feed so market_wide
- * articles aren't missed just because they don't name the ticker.
+ * ticker-scoped query with a crypto-bellwether-scoped feed (BTC, ETH)
+ * so market_wide articles aren't missed just because they don't name
+ * the specific ticker - e.g. a regulatory/Fed article that mentions
+ * Bitcoin but not Polkadot is still relevant context for a DOT anomaly.
+ *
+ * NOTE: originally this used an UNFILTERED /tiingo/news call
+ * (?sortBy=crawlDate, no ticker) to mirror cryptocurrency.cv's
+ * "breaking feed" design - but live testing showed Tiingo's unfiltered
+ * feed spans every asset class and topic they cover (confirmed live:
+ * a "hosepipe ban" utility/weather article came back), not just
+ * crypto/financial news like cryptocurrency.cv's breaking feed did.
+ * Querying BTC/ETH specifically (rather than no filter at all) keeps
+ * this a genuinely crypto-relevant "market-wide" pool instead of
+ * Tiingo's full multi-asset firehose. See DECISIONS.md ADR-019.
+ *
  * Deduplicates by url in case both endpoints return the same article.
  * Returns [] if TIINGO_API_KEY is unset or on any failure, rather than
  * throwing - a missing news source should degrade to "no citations
@@ -146,17 +166,29 @@ export async function fetchRecentNews(
 
   const symbol = toBaseSymbol(ticker);
 
-  const tickerUrl = `${BASE_URL}/tiingo/news?tickers=${encodeURIComponent(symbol)}&limit=${limit}`;
-  const latestUrl = `${BASE_URL}/tiingo/news?limit=${limit}&sortBy=crawlDate`;
+  // Crypto bellwethers used as a stand-in for "market-wide crypto news" -
+  // if the ticker being analyzed IS one of these, skip it from the
+  // bellwether list (querying "tickers=btc,btc" is harmless but
+  // redundant) and just rely on the ticker-scoped query alone.
+  const BELLWETHERS = ["btc", "eth"];
+  const bellwetherSymbols = BELLWETHERS.filter((b) => b !== symbol);
 
-  const [tickerArticles, latestArticles] = await Promise.all([
+  const tickerUrl = `${BASE_URL}/tiingo/news?tickers=${encodeURIComponent(symbol)}&limit=${limit}`;
+  const marketWideUrl =
+    bellwetherSymbols.length > 0
+      ? `${BASE_URL}/tiingo/news?tickers=${bellwetherSymbols.join(",")}&limit=${limit}&sortBy=crawlDate`
+      : null;
+
+  const [tickerArticles, marketWideArticles] = await Promise.all([
     fetchFromEndpoint(tickerUrl, ticker, symbol, apiKey),
-    fetchFromEndpoint(latestUrl, ticker, symbol, apiKey),
+    marketWideUrl
+      ? fetchFromEndpoint(marketWideUrl, ticker, symbol, apiKey)
+      : Promise.resolve([]),
   ]);
 
   const seen = new Set<string>();
   const combined: NewsArticleIngested[] = [];
-  for (const article of [...tickerArticles, ...latestArticles]) {
+  for (const article of [...tickerArticles, ...marketWideArticles]) {
     if (seen.has(article.url)) continue;
     seen.add(article.url);
     combined.push(article);
