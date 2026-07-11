@@ -321,6 +321,551 @@ solved prematurely.
 
 ---
 
+## ADR-011: Adanos endpoint/schema correction from real API examples
+
+**Context:** `sentimentIngestion.ts` was originally written from Adanos'
+published docs/SDK examples without a live response to check against
+(no network route to `api.adanos.org` from the dev sandbox this was
+built in - flagged explicitly as an open verification item in this
+file). The user later shared real screenshots of Adanos' actual API
+responses.
+
+**What was wrong:**
+
+- Assumed endpoint: `GET /v1/reddit-crypto/token?ticker=BTC` (ticker as
+  a query parameter)
+- Real endpoint: `GET /reddit/stocks/v1/stock/{TICKER}` (ticker as a
+  **path** parameter)
+- Assumed field: `mention_count`
+- Real field: `mentions`
+- Missed field entirely: `found` (boolean) - tells you whether Adanos
+  recognizes the ticker at all, distinct from "recognized but zero
+  mentions"
+
+**Fix applied:** Corrected the URL construction and field mapping in
+both `src/sentiment/sentimentIngestion.ts` and
+`src/eval/testLiveExternalApis.ts`. Added explicit handling for
+`found: false` - degrades to "no sentiment data" (returns `null`),
+consistent with every other soft-failure path in this pipeline, rather
+than silently returning zeros for a ticker Adanos doesn't recognize.
+
+**Still open:** every real example available (TSLA, NVDA, AMD, GME,
+SPY, GOOGL) is a stock ticker. Whether `/reddit/stocks/v1/stock/{...}`
+also serves crypto symbols (BTC, ETH) - as the Adanos homepage's
+"Reddit: Stocks, ETFs, crypto" tile implies it should - has not been
+confirmed with an actual crypto ticker response. If it returns
+`found: false` for crypto symbols in practice, this integration needs
+a different endpoint (not yet identified) or Adanos may not actually
+cover crypto through this particular product despite the marketing
+copy. **Verify with `testLiveExternalApis.ts` against a real crypto
+ticker before trusting this in production.**
+
+**Lesson for the log:** this is the second time in this project
+(`newsIngestion.ts` being the first) that an external API integration
+was built from documentation/marketing copy rather than a live
+response, and the first time it was actually wrong in a way that would
+have silently returned no data (`found: false` handling was missing
+entirely - the old code would have returned a snapshot with all-zero
+fields instead of correctly treating it as "no data available").
+Worth prioritizing a live-response check earlier in the process for
+any future external integration, rather than after the fact.
+
+**Status:** Fixed. Not yet verified end-to-end with a real crypto
+ticker - see "Open verification items" at the bottom of this file.
+(Superseded by ADR-012 below - the endpoint this ADR fixed to was
+still wrong, just less wrong.)
+
+---
+
+## ADR-012: Definitive fix - dedicated crypto endpoint found in real OpenAPI spec
+
+**Context:** ADR-011 corrected the endpoint/field names against
+screenshotted Adanos examples, but explicitly flagged an open
+question: every example available was a stock ticker
+(TSLA/NVDA/AMD/GME/SPY/GOOGL), and it was only an assumption that
+`/reddit/stocks/v1/stock/{ticker}` also covered crypto symbols.
+
+**What resolved it:** the user obtained Adanos' actual OpenAPI spec
+(`api-1.json`). It shows Adanos exposes entirely separate path
+families per platform AND per asset class:
+`/reddit/stocks/v1/...`, `/reddit/crypto/v1/...`, `/news/stocks/v1/...`,
+`/polymarket/stocks/v1/...`, `/x/stocks/v1/...` - stocks and crypto are
+genuinely different endpoint trees, not the same endpoint serving both.
+
+**The correct endpoint was never the stocks one.** It's:
+`GET /reddit/crypto/v1/token/{symbol}` - confirmed directly from the
+spec's `CryptoTokenSentiment` schema and a real example response for
+ETH.
+
+**Real schema (crypto-specific, from the spec):**
+`symbol`, `name`, `found`, `buzz_score` (0-100), `mentions`,
+`sentiment_score` (-1 to 1), `total_upvotes`, `unique_posts`,
+`subreddit_count`, `trend`, `bullish_pct`, `bearish_pct`,
+`period_days`, plus richer optional fields not currently consumed
+(`top_subreddits`, `daily_trend`, `top_mentions` - representative
+high-engagement posts, could be worth surfacing in the explanation
+prompt later as concrete evidence rather than just aggregate scores).
+
+**Also clarified by the spec (would have caused a subtle bug if
+missed):** `found: false` on a normal `200` response means the symbol
+IS supported but has no qualifying data in the requested window (e.g.
+a quiet ticker) - this is an expected, non-error case. A genuinely
+**unsupported** symbol returns HTTP `404` instead. These are two
+different "no data" situations that both degrade to `null` in our
+code, but are logged differently so a real symbol-support problem
+isn't confused with an ordinary quiet-ticker case.
+
+**Also confirmed by the spec:** the free tier is genuinely 250
+requests/month (`X-RateLimit-Limit-Monthly: 250` in the example
+response headers) - matches the design assumption in ADR-007, good to
+have it confirmed from the source rather than secondhand.
+
+**Fix applied:** `src/sentiment/sentimentIngestion.ts` and
+`src/eval/testLiveExternalApis.ts` now call
+`/reddit/crypto/v1/token/{symbol}`, map the real
+`CryptoTokenSentiment` fields, and distinguish 404 (unsupported) from
+`found:false` (supported, no data) with separate log messages.
+
+**Lesson for the log, updated from ADR-011:** two consecutive
+"corrections" to this same integration (ADR-011 then this one) were
+both still guesses until the actual OpenAPI spec was in hand. The
+spec should have been the first thing requested for any external
+integration, not the last - screenshots and docs pages are a weaker
+source than the machine-readable spec when one exists, and Adanos
+happens to publish exactly that (`/llms.txt` for agent consumption,
+per their own docs).
+
+**Status:** Fixed against the real spec. Field parsing not yet
+exercised against a live HTTP response from this environment (no
+network route to `api.adanos.org` from this sandbox) - still worth
+one real run via `testLiveExternalApis.ts BTC-USD` before trusting it
+in production, but the endpoint/schema themselves are no longer a
+guess.
+
+---
+
+## ADR-013: Confirmed against Adanos' authoritative machine-readable reference
+
+**Context:** ADR-012 fixed the crypto endpoint from the real OpenAPI
+spec (`api-1.json`). The user then supplied Adanos' full `llms.txt` -
+the canonical, agent-oriented reference Adanos publishes specifically
+for this purpose (linked from their own API root and OpenAPI docs).
+
+**Result:** the ADR-012 fix is exactly correct.
+`GET /reddit/crypto/v1/token/{symbol}` matches the documented endpoint
+and response shape precisely, including the `found` semantics (200 +
+`found:false` = supported symbol, no data this window) and the 404
+distinction for genuinely unsupported symbols.
+
+**One real refinement made from this reference:** the 404 response
+body has a structured shape - `detail.error_code`, specifically
+`"unsupported_symbol"` for crypto (vs `"unsupported_ticker"` for
+stocks). `sentimentIngestion.ts` now parses and logs this code instead
+of just logging "404", so a genuine "Adanos doesn't track this symbol"
+case is distinguishable in logs from other possible 404 causes.
+
+**New information surfaced, not yet acted on:**
+
+- **`GET /reddit/crypto/v1/market-sentiment`** returns an
+  aggregate crypto-wide sentiment reading with a `drivers[]` array
+  (top symbols driving overall crypto sentiment) - this maps directly
+  onto the `market_wide` concept from ADR-005 (news scope tagging).
+  Worth considering as a second sentiment candidate type alongside the
+  per-ticker snapshot: a `market_wide` sentiment reading, analogous to
+  how `market_wide` news articles are already handled, for anomalies
+  where crypto-wide social mood (not just this ticker's Reddit buzz)
+  might be the real driver. Not implemented - flagged here so it isn't
+  lost.
+- **`GET /reddit/crypto/v1/compare?symbols=BTC,ETH`** - fetches
+  sentiment for up to 10 symbols in one call. Not currently useful
+  (this project fetches one ticker per anomaly), but relevant if the
+  system ever needs to warm a sentiment cache for several tracked
+  tickers at once instead of one call per ticker.
+- Raw mention-level endpoints (`/token/{symbol}/mentions`) require a
+  **Professional** account tier, not Free - confirms the aggregate
+  `/token/{symbol}` endpoint (what this project actually uses) is the
+  right one for the free-tier constraint; the more granular raw data
+  simply isn't available on free at all.
+
+**Status:** Endpoint/schema fix confirmed correct against the
+authoritative source. Error-code parsing added. `market-sentiment` as
+a second candidate type is a new deferred idea, not yet built.
+
+---
+
+## ADR-014: Market-wide crypto sentiment as a second sentiment candidate type
+
+**Context:** ADR-013 surfaced `GET /reddit/crypto/v1/market-sentiment`
+as a deferred idea - an aggregate crypto-wide sentiment reading with a
+`drivers[]` list, mapping onto the existing `market_wide` news-scope
+concept (ADR-005). Decided to build it now rather than leave it
+deferred, since it's a natural extension of a pattern already proven
+to work for news.
+
+**Decision:** Add a `scope: "ticker_specific" | "market_wide"` field
+to `SentimentSnapshotIngested` (mirroring `NewsArticleIngested.scope`
+exactly). Fetch and cache BOTH a ticker-specific snapshot (existing
+`/reddit/crypto/v1/token/{symbol}`) and a market-wide snapshot (new -
+`/reddit/crypto/v1/market-sentiment`) for every anomaly, and hand both
+to the explanation agent as separate citable candidates.
+
+**Caching design:** the market-wide reading is NOT per-ticker (it's a
+single global crypto-market reading), so it's cached under one global
+Firestore key rather than one-per-ticker - every anomaly, regardless
+of which ticker, shares the same cached market-wide snapshot within
+the hourly TTL. This means adding market-wide sentiment does NOT
+double the monthly Adanos request count per ticker - it adds a
+constant ~1 extra fetch per hour total (across all tickers combined),
+not 1 extra fetch per ticker per hour. Refactored the caching logic
+into a shared `getCached()` helper in `SentimentIngestion` so both
+snapshot types reuse the same cache-check-then-fetch flow.
+
+**Prompt design:** the agent is told explicitly that a market_wide
+sentiment citation should be framed as a broad/systemic mood shift,
+not something specific to the ticker - same framing instruction
+already used for market_wide news (ADR-005), applied consistently to
+sentiment.
+
+**Confidence scoring:** `tickerSpecificFraction` (scope-specificity
+weighting, ADR in confidenceScorer.ts) now spans citations from BOTH
+news and sentiment uniformly, rather than being computed from news
+citations only - a citation's specificity should count the same way
+regardless of which evidence type it came from. Sentiment coherence
+checking was also generalized from "one cited sentiment snapshot" to
+"however many were cited" (0, 1, or 2) - if a ticker-specific snapshot
+and a market-wide snapshot disagree in direction, that disagreement
+correctly makes the composite signal incoherent rather than being
+silently averaged away.
+
+**Tradeoff accepted:** the explanation agent now has two sentiment
+candidates instead of one to reason about (plus however many news
+articles), a slightly larger prompt. Cost impact is small - it's still
+the same one Claude call per attempt, just a longer prompt, not an
+extra API call. The extra Adanos call is effectively free given the
+global-cache design above.
+
+**Status:** Implemented (`src/events/types.ts`,
+`src/sentiment/sentimentIngestion.ts` - new `getMarketSnapshot()`
+alongside the existing `getSnapshot()`, `src/agent/explanationAgent.ts`
+
+- `sentimentSnapshots` array replacing the old singular field,
+  `services/agent-svc/src/index.ts`, `services/grounding-svc/src/index.ts`
+- scope-aware confidence scoring, `src/eval/testLiveExternalApis.ts` -
+  opt-in second Adanos call via `FETCH_MARKET_SENTIMENT=1`). Not yet
+  exercised against a live Adanos response - same open verification
+  item as the rest of the sentiment integration.
+
+---
+
+## ADR-015: Honest no_clear_cause incorrectly failed structural grounding (real bug, found via live test)
+
+**Context:** The first live run of `testLiveExternalApis.ts` (XRP-USD,
+2026-07-11) surfaced a real bug: `groundingVerifier.ts` and
+`groundingVerifierAsync.ts` both unconditionally treated
+`cited_event_ids.length === 0` as a structural failure -
+`"no cited events - unsupported claim"` - regardless of whether the
+explanation's claim was actually `"no_clear_cause"`.
+
+**Why this was wrong:** an honest `no_clear_cause` (empty citations,
+by design - see ADR-006) is NOT the same failure mode as an
+`"explained"` claim with zero citations (which WOULD be a real
+violation - asserting a specific cause with nothing to back it up).
+The old code conflated these into one failure path. In production,
+this meant every genuinely honest "I couldn't find a cause" answer
+from the agent got labeled `structurally_grounded: false` with the
+same failure reason as an actual fabrication - directly undermining
+the distinction ADR-006 was built to preserve.
+
+**Compounding issue:** even after fixing the grounding check itself,
+letting a `no_clear_cause` explanation flow through
+`computeConfidence()` produces a misleading nonzero score (~0.1-0.2,
+from the "unknown/neutral" defaults in confidenceScorer.ts) for a
+claim that explicitly has no causal content to be confident about.
+
+**Fix applied (both files, plus grounding-svc and the test script):**
+
+- `groundingVerifier.ts` / `groundingVerifierAsync.ts`: empty citations
+  now return `structurally_grounded: true` (vacuously grounded -
+  nothing to verify) specifically when `claim === "no_clear_cause"`;
+  the `"no cited events - unsupported claim"` failure is now reserved
+  for an explanation that asserts something but cites nothing.
+- `services/grounding-svc/src/index.ts`: added a short-circuit
+  immediately after the structural check - a `no_clear_cause`
+  explanation now publishes its `AlertReady` directly with
+  `composite_confidence: 0`, skipping the scoring math entirely,
+  mirroring the pattern already used for small-tier skips in
+  `agent-svc`.
+- `src/eval/testLiveExternalApis.ts`: same skip, for consistency.
+
+**How this was found:** this is a genuine example of why the live
+smoke test was worth building - a scenario this specific (an honest
+"no cause found" response) never came up in the hand-authored eval
+scenarios (`runEvals.ts`), which tend to be written around cases WITH
+a documented ground-truth cause.
+
+**Status:** Fixed in all four locations, typechecked clean.
+
+---
+
+## ADR-016: cryptocurrency.cv outage - third-party hosting issue, not an integration bug
+
+**Context:** The same live test run got `HTTP 402` from both
+`newsIngestion.ts` endpoints. Investigation (`curl -v`) showed the
+response was `x-vercel-error: DEPLOYMENT_DISABLED` with body "Payment
+required" - this is Vercel's own platform message when a site owner's
+hosting bill is unpaid or usage-capped, not cryptocurrency.cv's API
+responding to a request. The API's own documentation and GitHub
+README still claim "100% Free - No API keys required."
+
+**Conclusion:** this is a genuine, ordinary outage of a free
+third-party side-project API, unrelated to anything in this codebase.
+`newsIngestion.ts`'s endpoint paths, auth assumptions (none needed),
+and cost assumptions (free) are all still correct as designed - there
+is nothing to fix in the integration itself.
+
+**What this demonstrated working correctly:** with 0 news articles
+returned, the pipeline did NOT error or fabricate - it correctly
+proceeded to `no_clear_cause` (see ADR-015 above, which this same test
+run surfaced). Graceful degradation under a real external failure,
+exactly as designed.
+
+**Open question this raises: resiliency against free-tier
+dependencies.** This project now depends on THREE free external APIs
+(Coinbase WS, Adanos, cryptocurrency.cv), each of which can silently
+go dark for reasons entirely outside this codebase's control (a
+maintainer's unpaid hosting bill, in this case). Options, not yet
+decided:
+
+1. Accept the risk - free-tier dependencies are part of the
+   project's explicit cost-conscious design (ADR-007, ADR-009), and a
+   graceful `no_clear_cause` fallback already exists for exactly this
+   failure mode.
+2. Add a second, independent free news source as a fallback if the
+   primary one is down for some period - more integration surface and
+   another schema to maintain, for a benefit that only matters during
+   an outage.
+3. Just retry later and treat this as transient - Vercel deployments
+   get re-enabled once the owner's billing is sorted, which could be
+   hours or could be indefinite depending on whether the project is
+   actively maintained.
+
+Leaning toward option 1/3 (no code change, just wait and retry) given
+this is a portfolio/learning project, not a production system with an
+uptime SLA - but noting the tradeoff explicitly rather than silently
+picking it.
+
+**Status:** Confirmed external, not a bug. No fix needed in this
+codebase. Resiliency tradeoff logged, not yet decided.
+
+---
+
+## ADR-017: Swapped cryptocurrency.cv for Tiingo News API
+
+**Context:** ADR-016 confirmed cryptocurrency.cv's outage was a
+third-party hosting issue (Vercel `DEPLOYMENT_DISABLED` - the
+maintainer's own unpaid bill), not a bug in this codebase. But it
+raised a real resiliency question: depending on a free side-project
+API means the whole news-ingestion path can go dark for reasons
+entirely outside this project's control, with no warning and no ETA
+for recovery.
+
+**Options considered** (researched candidates: CoinGecko Demo,
+CoinMarketCap Basic, Tiingo News API, NewsData.io):
+
+- CoinGecko/CoinMarketCap free tiers are strong for market/price data
+  but aren't built as full-article news-content APIs - weaker fit for
+  what `newsIngestion.ts` actually needs (headline + summary text to
+  scope-classify and cite).
+- NewsData.io - real article text, 5,000 req/month, but general news
+  (not crypto-native) - would need extra filtering for crypto
+  relevance.
+- **Tiingo News API** - purpose-built financial news mapped to 4,100+
+  tickers (stocks, crypto, FX), 15+ years of history, 8,000-12,000
+  articles/day. Closest match to the existing two-endpoint design
+  (ticker-scoped + general/latest feed).
+
+**Decision:** Tiingo News API.
+
+**Why:** best content fit (real article text, not just price data),
+and - just as importantly - a funded, commercially-operated API rather
+than a free side-project, meaningfully reducing the "silently goes
+dark" risk ADR-016 surfaced. Tiingo's "personal/internal use" license
+restriction doesn't block this project: the restriction targets
+redistributing their raw feed in a commercial/public product, not
+processing news to generate this project's own derived explanations.
+
+**Implementation, confirmed against Tiingo's actual published schema**
+(fetched directly from https://www.tiingo.com/documentation/news,
+2026-07-11 - not guessed from marketing copy or a screenshot, learned
+from the Adanos ADR-011/012 lesson to go straight to the authoritative
+source):
+
+- Endpoint: `GET https://api.tiingo.com/tiingo/news`
+- Auth: `Authorization: Token {TIINGO_API_KEY}` header (not keyless,
+  unlike the old cryptocurrency.cv assumption)
+- Real fields: `id`, `title`, `url`, `description`, `publishedDate`,
+  `crawlDate`, `source` (domain), `tickers[]`, `tags[]`
+- Same two-fetch pattern preserved: `?tickers={symbol}` (ticker-scoped)
+  - `?sortBy=crawlDate` with no ticker filter (latest/general, catches
+    market_wide articles a ticker-scoped query would miss)
+- **One real improvement over the old design**: Tiingo's own
+  `tickers[]` array is a stronger ticker-specific signal than the
+  lexicon-based `classifyNewsScope()` heuristic - if Tiingo itself
+  tagged an article with the exact symbol, that's trusted directly as
+  `ticker_specific` rather than re-guessing from headline/summary text.
+  The lexicon classifier remains the fallback for everything else
+  (including `market_wide` detection, which Tiingo's tagging doesn't
+  directly signal).
+- `fetchRecentNews()` still returns `[]` (not throws) when
+  `TIINGO_API_KEY` is unset or any request fails - same graceful
+  degradation to honest `no_clear_cause` as before (ADR-006/ADR-015).
+
+**Tradeoff accepted:** no longer keyless - requires a free Tiingo
+signup, one more credential to manage alongside Anthropic/Adanos/Groq.
+Worth it for the reliability gain.
+
+**Status:** Implemented (`src/news/newsIngestion.ts`,
+`.env.example`, `src/eval/testLiveExternalApis.ts` references
+updated). Not yet exercised against a live Tiingo response - same
+"confirmed from docs, not yet from a live call" caveat as the Adanos
+work before ADR-013 validated it live.
+
+---
+
+## ADR-018: Tiingo News confirmed paid-only - decided to upgrade to Power
+
+**Context:** ADR-017 swapped `newsIngestion.ts` to Tiingo. The first
+live test (DOT-USD) got `HTTP 403` on both endpoints. Investigation
+first considered an auth/config issue (wrong header format, a
+News-API opt-in checkbox some Tiingo accounts need). The user then
+supplied a screenshot of Tiingo's actual pricing page, which settles
+it definitively.
+
+**Confirmed:** Tiingo's pricing table has an explicit "Tiingo News"
+row - **✗ on Starter ($0/month), ✓ only on Power ($30/month)**. This
+is not a bug, not a missing checkbox, not a header format issue - the
+free tier genuinely excludes the News API entirely. (IEX Feed and
+Tiingo Crypto, by contrast, ARE included free - it's specifically News
+that's gated.)
+
+**Decision point, not yet resolved:** this breaks the project's
+consistent "stay on free tier" design principle (ADR-007, ADR-009).
+Options:
+
+1. Pay Tiingo Power ($30/month) - best content quality (20M articles,
+   3 months queryable history, proper ticker/FX/equity/crypto tagging)
+   but the project's first paid dependency.
+2. Switch to NewsData.io (free, 5,000 req/month) - real article text,
+   general news rather than crypto-native, would need extra
+   crypto-relevance filtering on top.
+3. Look for one more free, crypto-native option before deciding.
+
+**Decision made:** Option 1 - upgrading to Tiingo Power ($30/month).
+This is the project's first paid dependency, a deliberate departure
+from the free-tier-only principle held everywhere else (Coinbase,
+Adanos, the X/Twitter rejection in ADR-009). Worth being upfront about
+in any presentation of this project's architecture: everything else
+is free by design; news ingestion is the one exception, chosen for
+content quality (20M articles, proper multi-asset tagging) over
+staying strictly free.
+
+**Status:** Resolved. No code changes needed - `newsIngestion.ts`
+(ADR-017) was already correctly written against Tiingo's real schema;
+the `403` was purely the Starter plan's News restriction, not a bug.
+Once the Power plan is active, the exact same code should work as-is.
+
+---
+
+## ADR-019: Tiingo's unfiltered feed is too broad for "market_wide" - scoped to crypto bellwethers instead
+
+**Context:** With Tiingo Power active (ADR-018), the first real news
+test (DOT-USD) returned 0 candidates with no errors - a different,
+quieter symptom than the earlier `403`. Direct `curl` on the
+unfiltered `?sortBy=crawlDate` endpoint (no ticker filter) - the query
+this project had been using as the "general/latest feed," mirroring
+cryptocurrency.cv's old "breaking news" endpoint - returned a "What is
+a hosepipe ban" utility/weather article as the top result.
+
+**What this revealed:** Tiingo's news feed spans every asset class and
+topic they cover (stocks, ETFs, general financial/lifestyle topics -
+their own docs mention art blogs, farming publications, healthcare
+trade magazines). Unlike cryptocurrency.cv's breaking feed (crypto-only
+by construction), an unfiltered Tiingo query is NOT crypto-specific at
+all. Every one of those general articles was correctly classified as
+`unrelated` by `classifyNewsScope()` and discarded - so the 0-candidate
+result was the classifier working as designed, not a bug in it. The
+actual bug was upstream: the query itself was the wrong shape for what
+"market_wide crypto news" is supposed to mean.
+
+**Fix:** replaced the unfiltered query with `tickers=btc,eth` (Tiingo's
+documented, confirmed comma-separated tickers parameter - not a guess)
+as a crypto-bellwether proxy for "market-wide crypto news." A
+regulatory/Fed article that mentions Bitcoin or Ethereum but not the
+specific ticker being analyzed is exactly the kind of `market_wide`
+context this project wants (same intent as ADR-005), without pulling
+in Tiingo's full multi-asset-class firehose. If the ticker being
+analyzed IS BTC or ETH itself, it's excluded from its own bellwether
+list (redundant, not harmful, just cleaned up).
+
+**Tradeoff accepted:** this is a narrower "market-wide" definition than
+"literally any macro/regulatory crypto news" - it specifically means
+"news that also got tagged against BTC or ETH." A genuinely market-wide
+crypto article that Tiingo's tagging algorithm somehow didn't associate
+with either bellwether would be missed. Considered using Tiingo's
+`tags=` parameter instead (also real, confirmed via a community
+integration script) but did not use it here because the actual tag
+string values Tiingo uses for crypto/regulatory topics aren't confirmed
+from their own docs - would have been another guess, the exact mistake
+ADR-011/012 already taught not to repeat. `tickers=btc,eth` uses only
+the parameter and value shape already confirmed live.
+
+**Status:** Implemented (`src/news/newsIngestion.ts`). Not yet
+re-tested live after this fix - next `testLiveExternalApis.ts` run
+should confirm real candidates now come through instead of an
+unfiltered, mostly-irrelevant feed.
+
+---
+
+## ADR-020: Synthetic test price needed to be realistic per-ticker, not just "not zero"
+
+**Context:** ADR (price:0 fix, folded into the file header history)
+already fixed the original placeholder problem - a synthetic anomaly
+price of exactly `0` caused Claude to correctly flag "price crashed to
+zero" as a data glitch instead of attempting a real explanation. The
+fix at the time was a generic `mean=100` placeholder. Live testing
+with BTC-USD showed this had the SAME underlying problem in a new
+form: once real Tiingo news came back mentioning BTC's actual price
+(~$64,000), the synthetic anomaly price ($105, from `100 + 5*1`) stuck
+out as obviously inconsistent - Claude again (correctly) concluded
+"data glitch" rather than testing the explanation pipeline against a
+plausible scenario.
+
+**Root cause, more precisely stated:** the problem was never really
+about avoiding zero specifically - it's that the synthetic price needs
+to be in the right ballpark for whatever ticker is actually being
+tested, now that real news/sentiment content is in the picture and
+Claude can (correctly) cross-reference the synthetic price against
+real-world figures it just read.
+
+**Fix:** added a small `ROUGH_PRICE_ESTIMATES` lookup (BTC, ETH, SOL,
+XRP, DOT, ADA, AVAX, LINK, DOGE, MATIC) giving each a realistic
+ballpark price, with a generic `$50` fallback for anything not listed.
+The synthetic rolling_mean/mad/price are now derived from that
+baseline instead of a fixed generic number, so the synthetic anomaly
+is at least plausible alongside genuine fetched content.
+
+**Status:** Implemented (`src/eval/testLiveExternalApis.ts`). Still a
+known limitation: these are rough, hand-maintained estimates, not
+live-fetched prices - if BTC's real price drifts far enough from
+$64,000 in the future, this same class of issue could resurface for
+BTC specifically. A more robust fix (fetching a real current price
+from a free source before constructing the synthetic anomaly) is a
+reasonable future improvement if this becomes a recurring annoyance,
+but wasn't judged worth the extra API dependency for what's
+fundamentally a test/dev script, not production code.
+
+---
+
 ## Deferred / not yet built (tracked, not forgotten)
 
 - **v2 backtesting batch layer** - replay EWMA/MAD against historical
@@ -333,15 +878,33 @@ solved prematurely.
   market reaction priors, feeding back into the live confidence
   scorer. Must guard against reverse causality (news written after the
   move already happened) and category sample imbalance.
+- **Daily trending snapshot** (`GET /reddit/crypto/v1/trending`) -
+  cache once/day globally (same pattern as market-wide sentiment: one
+  shared global key, not per-ticker, so cost is ~30 calls/month
+  regardless of ticker count - free tier is 250/month). Two intended
+  uses: (1) feed into the explanation prompt as ambient corroborating
+  context (e.g. "BTC is #2 on Reddit trending" alongside the existing
+  news/sentiment candidates), and (2) a feature for the deferred
+  backtesting/news-impact-study batch layers - "was this ticker
+  trending the day of/before the anomaly?" as a signal to test against
+  outcomes later. New event type (`TrendingSnapshotIngested`, kept
+  separate from the sentiment snapshot since it's a ranked list, not a
+  single reading), stored in the event store same as everything else.
+  Not started.
 
-## Open verification items (schema assumed, not yet confirmed live)
+## Open verification items (schema confirmed from spec, not yet exercised live)
 
-- `src/news/newsIngestion.ts` - cryptocurrency.cv field names
-  (`title`/`headline`, `published_at`/`publishedAt`, etc.) built from
-  published examples, not a live response.
-- `src/sentiment/sentimentIngestion.ts` - Adanos field names
-  (`buzz_score`, `sentiment_score`, `trend`, `mention_count`) same
-  caveat.
+- `src/news/newsIngestion.ts` - endpoint and schema now confirmed
+  directly from Tiingo's own documentation page (ADR-017):
+  `GET /tiingo/news`. Field names (`title`, `description`, `url`,
+  `publishedDate`, `tickers[]`, etc.) come from Tiingo's published
+  docs, not a live response yet - same caveat pattern as Adanos before
+  ADR-013 validated it live.
+- `src/sentiment/sentimentIngestion.ts` - **validated live** (ADR-013):
+  real XRP response confirmed the schema matches exactly. The
+  Adanos side of this project is the one integration that's actually
+  been proven end-to-end against a real response, not just a spec.
 - Use `src/eval/testLiveExternalApis.ts` (single-call-per-API smoke
-  test, no Firestore/Pub-Sub side effects) to verify both against real
-  responses before relying on them in production.
+  test, no Firestore/Pub-Sub side effects) to verify Tiingo against a
+  real response before relying on it in production - this is now the
+  one remaining unverified external integration.

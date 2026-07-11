@@ -58,25 +58,68 @@ app.post("/pubsub/push", async (req, res) => {
 
   try {
     console.log(
-      `[grounding-svc] verifying explanation for ${explanation.ticker}, claim="${explanation.claim}"`
+      `[grounding-svc] verifying explanation for ${explanation.ticker}, claim="${explanation.claim}"`,
     );
 
     const verdict = await verifier.verifyStructural(explanation);
     await store.append(verdict);
 
     if (!verdict.structurally_grounded) {
-      console.log(
-        `[grounding-svc] REJECTED: ${verdict.failure_reason}`
-      );
+      console.log(`[grounding-svc] REJECTED: ${verdict.failure_reason}`);
+      processedCount++;
+      res.status(200).send();
+      return;
+    }
+
+    // An honest "no_clear_cause" now passes structural grounding (see
+    // groundingVerifierAsync.ts / DECISIONS.md ADR-015) - correctly, since
+    // there's nothing to fabricate when nothing was cited. But it should
+    // NOT flow through computeConfidence(): with zero citations, every
+    // signal defaults to its "unknown/neutral" credit, producing a
+    // nonsensical nonzero "confidence" (~0.1-0.2) for an explanation that
+    // explicitly says there IS no explanation. Confidence is a measure of
+    // how well-supported a CAUSAL claim is - it doesn't apply to the
+    // absence of one. Short-circuit here the same way agent-svc already
+    // does for small-tier skips: report the anomaly honestly (per
+    // ADR-006), composite_confidence: 0, without running the scoring math.
+    if (explanation.claim === "no_clear_cause") {
+      const anomaly = (await store.getById(explanation.anomaly_event_id)) as
+        | PriceAnomalyDetected
+        | undefined;
+      if (anomaly) {
+        const alert = {
+          type: "AlertReady" as const,
+          event_id: uuidv4(),
+          ticker: explanation.ticker,
+          timestamp: Date.now(),
+          anomaly_event_id: explanation.anomaly_event_id,
+          explanation_event_id: explanation.event_id,
+          claim: explanation.claim,
+          human_summary: explanation.human_summary,
+          structurally_grounded: true,
+          composite_confidence: 0,
+          price_z_score: anomaly.price_z_score,
+          volume_z_score: anomaly.volume_z_score,
+        };
+        await store.append(alert);
+        await publishEvent(ALERTS_TOPIC, alert);
+        console.log(
+          `[grounding-svc] VERIFIED (no_clear_cause, reported honestly, no confidence scoring): ${explanation.ticker}`,
+        );
+      } else {
+        console.warn(
+          `[grounding-svc] anomaly ${explanation.anomaly_event_id} not found - skipping alert fan-out`,
+        );
+      }
       processedCount++;
       res.status(200).send();
       return;
     }
 
     // Structural check passed - now gather the confidence signals.
-    const anomaly = (await store.getById(
-      explanation.anomaly_event_id
-    )) as PriceAnomalyDetected | undefined;
+    const anomaly = (await store.getById(explanation.anomaly_event_id)) as
+      | PriceAnomalyDetected
+      | undefined;
 
     const citedArticles: NewsArticleIngested[] = [];
     const citedSentiments: SentimentSnapshotIngested[] = [];
@@ -93,7 +136,9 @@ app.post("/pubsub/push", async (req, res) => {
       new Set(citedArticles.map((a) => a.source)).size + citedSentiments.length; // each cited sentiment snapshot counts as its own independent source
 
     const articleSentimentResults = anomaly
-      ? citedArticles.map((a) => checkSentimentCoherence(a, anomaly.price_direction))
+      ? citedArticles.map((a) =>
+          checkSentimentCoherence(a, anomaly.price_direction),
+        )
       : [];
 
     // Direct numeric coherence check for each cited sentiment snapshot -
@@ -129,8 +174,9 @@ app.post("/pubsub/push", async (req, res) => {
       citedArticles.length === 0 || !anomaly
         ? 0
         : citedArticles.reduce(
-            (sum, a) => sum + temporalProximityScore(a.timestamp, anomaly.timestamp),
-            0
+            (sum, a) =>
+              sum + temporalProximityScore(a.timestamp, anomaly.timestamp),
+            0,
           ) / citedArticles.length;
 
     // Scope specificity now spans BOTH citable evidence types (news and
@@ -151,19 +197,22 @@ app.post("/pubsub/push", async (req, res) => {
     // properly separate signals.
     const volumeResult = newsVolumeTracker.record(
       explanation.ticker,
-      explanation.candidate_news_count
+      explanation.candidate_news_count,
     );
 
     const semanticCheckContent = [
       ...citedArticles.map((a) => `${a.headline}: ${a.summary}`),
       ...citedSentiments.map(
         (s) =>
-          `Reddit sentiment (${s.scope}): score=${s.sentiment_score.toFixed(2)} (-1 bearish to +1 bullish), trend=${s.trend}, buzz=${s.buzz_score}/100`
+          `Reddit sentiment (${s.scope}): score=${s.sentiment_score.toFixed(2)} (-1 bearish to +1 bullish), trend=${s.trend}, buzz=${s.buzz_score}/100`,
       ),
     ];
     const semanticSupport =
       semanticCheckContent.length > 0
-        ? await verifyClaimSupportedByContent(explanation.claim, semanticCheckContent)
+        ? await verifyClaimSupportedByContent(
+            explanation.claim,
+            semanticCheckContent,
+          )
         : null;
 
     const confidence = computeConfidence({
@@ -178,7 +227,7 @@ app.post("/pubsub/push", async (req, res) => {
 
     console.log(
       `[grounding-svc] VERIFIED: claim="${explanation.claim}" composite_confidence=${confidence.score.toFixed(2)}`,
-      confidence.breakdown
+      confidence.breakdown,
     );
 
     if (anomaly) {
@@ -200,7 +249,7 @@ app.post("/pubsub/push", async (req, res) => {
       await publishEvent(ALERTS_TOPIC, alert);
     } else {
       console.warn(
-        `[grounding-svc] anomaly ${explanation.anomaly_event_id} not found - skipping alert fan-out`
+        `[grounding-svc] anomaly ${explanation.anomaly_event_id} not found - skipping alert fan-out`,
       );
     }
 

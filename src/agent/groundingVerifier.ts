@@ -27,13 +27,28 @@ export class GroundingVerifier {
     const anomaly = this.store.getById(explanation.anomaly_event_id);
 
     if (!anomaly) {
-      return this.fail(
-        explanation,
-        "anomaly_event_id does not exist in store"
-      );
+      return this.fail(explanation, "anomaly_event_id does not exist in store");
     }
 
     if (explanation.cited_event_ids.length === 0) {
+      // An honest "I couldn't find a cause" (claim === "no_clear_cause")
+      // is NOT the same as an unsupported claim - it's the correct,
+      // designed-for outcome when no candidate actually explains the
+      // anomaly (see DECISIONS.md ADR-006). There is nothing to verify
+      // here - vacuously grounded, not failed. Only a claim that ASSERTS
+      // a specific cause with zero citations is a real structural
+      // violation (the agent made a claim it can't back up).
+      if (explanation.claim === "no_clear_cause") {
+        return {
+          type: "GroundingVerified",
+          event_id: uuidv4(),
+          ticker: explanation.ticker,
+          timestamp: Date.now(),
+          explanation_event_id: explanation.event_id,
+          structurally_grounded: true,
+          semantically_grounded: null,
+        };
+      }
       return this.fail(explanation, "no cited events - unsupported claim");
     }
 
@@ -42,13 +57,13 @@ export class GroundingVerifier {
       if (!cited) {
         return this.fail(
           explanation,
-          `cited event_id ${citedId} does not exist in store`
+          `cited event_id ${citedId} does not exist in store`,
         );
       }
       if (cited.timestamp > anomaly.timestamp) {
         return this.fail(
           explanation,
-          `cited event ${citedId} (t=${cited.timestamp}) occurs AFTER the anomaly it explains (t=${anomaly.timestamp}) - causality violation`
+          `cited event ${citedId} (t=${cited.timestamp}) occurs AFTER the anomaly it explains (t=${anomaly.timestamp}) - causality violation`,
         );
       }
     }
@@ -66,7 +81,7 @@ export class GroundingVerifier {
 
   private fail(
     explanation: ExplanationGenerated,
-    reason: string
+    reason: string,
   ): GroundingVerified {
     return {
       type: "GroundingVerified",
@@ -92,7 +107,7 @@ export class GroundingVerifier {
    */
   async verifySemantic(
     explanation: ExplanationGenerated,
-    checkFn: (claim: string, citedContent: string[]) => Promise<boolean>
+    checkFn: (claim: string, citedContent: string[]) => Promise<boolean>,
   ): Promise<boolean> {
     const citedContent = explanation.cited_event_ids
       .map((id) => this.store.getById(id))

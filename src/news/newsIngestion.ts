@@ -3,85 +3,91 @@ import { NewsArticleIngested } from "../events/types";
 import { classifyNewsScope } from "./scopeClassifier";
 
 /**
- * Fetches recent news relevant to a ticker from cryptocurrency.cv - a
- * free, open source, no-API-key-required crypto news aggregator (130+
- * sources, historical archive back to 2017).
+ * Fetches recent news relevant to a ticker from Tiingo's News API -
+ * replaces the earlier cryptocurrency.cv integration, which turned out
+ * to be down (Vercel DEPLOYMENT_DISABLED on the maintainer's own
+ * hosting - see DECISIONS.md ADR-016) rather than genuinely free/keyless
+ * as advertised.
+ *
+ * Requires a free Tiingo account + API token (TIINGO_API_KEY env var) -
+ * unlike cryptocurrency.cv, this is NOT keyless, but it's a funded,
+ * commercially-operated financial news API (15+ years of history,
+ * 8,000-12,000 articles/day), which is a materially more durable
+ * dependency than a free side-project that can silently go dark.
+ *
+ * NOTE ON SCHEMA: confirmed directly from Tiingo's own documentation
+ * page (https://www.tiingo.com/documentation/news, fetched 2026-07-11),
+ * not guessed from marketing copy - this is the field-by-field schema
+ * Tiingo itself publishes, not a reconstruction (learned from the
+ * Adanos ADR-011/012 experience - go straight to the authoritative
+ * source, not a screenshot or a blog post about it).
  *
  * Fetches from TWO endpoints and tags scope at ingestion time (paid
  * once per article, not once per anomaly):
- *   - ticker-specific query (?ticker=BTC) -> mostly ticker_specific, but
- *     re-classified anyway since a ticker-filtered feed can still
- *     surface market-wide pieces that happen to mention the ticker in
- *     passing
- *   - general/breaking feed (no ticker filter) -> classified against
- *     the same ticker, surfaces market_wide articles a ticker-scoped
- *     query would miss entirely (e.g. a Fed rate decision article that
- *     never says "Bitcoin" but is still relevant context)
- *
- * NOTE ON SCHEMA: built from cryptocurrency.cv's published examples,
- * not verified against a live response (this dev sandbox has no network
- * route to cryptocurrency.cv). Parsing is defensive - verify field names
- * on your machine and adjust `parseArticle` if they don't match.
+ *   - ticker-specific query (?tickers=btc) -> mostly ticker_specific,
+ *     but re-classified anyway since Tiingo's own tagging can surface
+ *     multi-ticker articles that are more macro in nature
+ *   - general/latest feed (no ticker filter, sorted by crawlDate) ->
+ *     classified against the same ticker, surfaces market_wide articles
+ *     a ticker-scoped query would miss entirely (e.g. a Fed rate
+ *     decision article that never says "Bitcoin" but is still relevant
+ *     context)
  */
 
-const BASE_URL = "https://cryptocurrency.cv";
+const BASE_URL = "https://api.tiingo.com";
 
-interface RawArticle {
-  title?: string;
-  headline?: string;
-  summary?: string;
-  description?: string;
-  source?: string;
-  url?: string;
-  link?: string;
-  published_at?: string;
-  publishedAt?: string;
-  date?: string;
-  timestamp?: number;
+/** Matches Tiingo's real /tiingo/news response schema (docs, 2026-07-11). */
+interface TiingoArticle {
+  id: number;
+  title: string;
+  url: string;
+  description: string;
+  publishedDate: string; // ISO datetime, UTC
+  crawlDate: string; // ISO datetime, UTC
+  source: string; // domain, e.g. "coindesk.com"
+  tickers: string[]; // Tiingo's own ticker tagging - lowercase, e.g. "btc"
+  tags: string[];
 }
 
-interface NewsApiResponse {
-  articles: RawArticle[];
-}
-
-/** Coinbase-style "BTC-USD" -> cryptocurrency.cv-style "BTC" */
+/** Coinbase-style "BTC-USD" -> Tiingo-style "btc" (lowercase, no quote currency) */
 function toBaseSymbol(ticker: string): string {
-  return ticker.split("-")[0];
+  return ticker.split("-")[0].toLowerCase();
 }
 
 function parseArticle(
-  raw: RawArticle,
+  raw: TiingoArticle,
   ticker: string,
-  tickerBaseSymbol: string
+  tickerBaseSymbol: string,
 ): NewsArticleIngested | null {
-  const headline = raw.title ?? raw.headline;
-  const summary = raw.summary ?? raw.description ?? "";
-  const url = raw.url ?? raw.link;
-  const source = raw.source ?? "cryptocurrency.cv";
+  if (!raw.title || !raw.url) return null; // can't ground a citation without these
 
-  if (!headline || !url) return null; // can't ground a citation without these
+  const summary = raw.description ?? "";
+  const timestamp = new Date(raw.publishedDate).getTime();
+  const validTimestamp = Number.isFinite(timestamp) ? timestamp : Date.now();
 
-  let timestamp: number;
-  if (raw.timestamp) {
-    timestamp = raw.timestamp;
-  } else {
-    const dateStr = raw.published_at ?? raw.publishedAt ?? raw.date;
-    const parsed = dateStr ? new Date(dateStr).getTime() : NaN;
-    timestamp = Number.isFinite(parsed) ? parsed : Date.now();
-  }
+  // Tiingo's own tickers[] tagging is a stronger signal than our text
+  // heuristic when it's available - if Tiingo itself tagged this
+  // article with our exact ticker, trust that over the lexicon
+  // classifier's guess. Otherwise fall back to classifyNewsScope
+  // (headline/summary text match) exactly as before.
+  const taggedByTiingo = raw.tickers?.some(
+    (t) => t.toLowerCase() === tickerBaseSymbol.toLowerCase(),
+  );
+  const scope = taggedByTiingo
+    ? "ticker_specific"
+    : classifyNewsScope(raw.title, summary, tickerBaseSymbol);
 
-  const scope = classifyNewsScope(headline, summary, tickerBaseSymbol);
   if (scope === "unrelated") return null; // filtered out at ingestion time
 
   return {
     type: "NewsArticleIngested",
     event_id: uuidv4(),
     ticker,
-    timestamp,
-    headline,
+    timestamp: validTimestamp,
+    headline: raw.title,
     summary,
-    source,
-    url,
+    source: raw.source,
+    url: raw.url,
     scope,
   };
 }
@@ -89,18 +95,25 @@ function parseArticle(
 async function fetchFromEndpoint(
   url: string,
   ticker: string,
-  tickerBaseSymbol: string
+  tickerBaseSymbol: string,
+  apiKey: string,
 ): Promise<NewsArticleIngested[]> {
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, {
+      headers: { Authorization: `Token ${apiKey}` },
+    });
     if (!res.ok) {
       console.error(`[newsIngestion] HTTP ${res.status} fetching ${url}`);
       return [];
     }
-    const data: NewsApiResponse = await res.json();
-    if (!data.articles) return [];
+    const data = await res.json();
+    // Tiingo's REST endpoints return a raw JSON array, not a wrapped
+    // object - defensive fallback in case that assumption is ever wrong.
+    const articles: TiingoArticle[] = Array.isArray(data)
+      ? data
+      : (data.articles ?? data.data ?? []);
 
-    return data.articles
+    return articles
       .map((a) => parseArticle(a, ticker, tickerBaseSymbol))
       .filter((e): e is NewsArticleIngested => e !== null);
   } catch (err) {
@@ -111,30 +124,39 @@ async function fetchFromEndpoint(
 
 /**
  * Fetch recent, scope-tagged news relevant to a ticker. Combines a
- * ticker-scoped query with a general/breaking feed so market_wide
+ * ticker-scoped query with a general/latest feed so market_wide
  * articles aren't missed just because they don't name the ticker.
  * Deduplicates by url in case both endpoints return the same article.
- * Returns [] on any failure rather than throwing - a missing news
- * source should degrade to "no citations available" (which the
- * grounding verifier correctly rejects), not crash the pipeline.
+ * Returns [] if TIINGO_API_KEY is unset or on any failure, rather than
+ * throwing - a missing news source should degrade to "no citations
+ * available" (which correctly leads to an honest no_clear_cause - see
+ * DECISIONS.md ADR-006/ADR-015), not crash the pipeline.
  */
 export async function fetchRecentNews(
   ticker: string,
-  limit = 10
+  limit = 10,
 ): Promise<NewsArticleIngested[]> {
+  const apiKey = process.env.TIINGO_API_KEY;
+  if (!apiKey) {
+    console.warn(
+      "[newsIngestion] TIINGO_API_KEY not set - skipping news fetch",
+    );
+    return [];
+  }
+
   const symbol = toBaseSymbol(ticker);
 
-  const tickerUrl = `${BASE_URL}/api/news?ticker=${encodeURIComponent(symbol)}&limit=${limit}`;
-  const breakingUrl = `${BASE_URL}/api/breaking?limit=${limit}`;
+  const tickerUrl = `${BASE_URL}/tiingo/news?tickers=${encodeURIComponent(symbol)}&limit=${limit}`;
+  const latestUrl = `${BASE_URL}/tiingo/news?limit=${limit}&sortBy=crawlDate`;
 
-  const [tickerArticles, breakingArticles] = await Promise.all([
-    fetchFromEndpoint(tickerUrl, ticker, symbol),
-    fetchFromEndpoint(breakingUrl, ticker, symbol),
+  const [tickerArticles, latestArticles] = await Promise.all([
+    fetchFromEndpoint(tickerUrl, ticker, symbol, apiKey),
+    fetchFromEndpoint(latestUrl, ticker, symbol, apiKey),
   ]);
 
   const seen = new Set<string>();
   const combined: NewsArticleIngested[] = [];
-  for (const article of [...tickerArticles, ...breakingArticles]) {
+  for (const article of [...tickerArticles, ...latestArticles]) {
     if (seen.has(article.url)) continue;
     seen.add(article.url);
     combined.push(article);

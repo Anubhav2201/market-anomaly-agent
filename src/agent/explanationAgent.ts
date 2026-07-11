@@ -182,7 +182,7 @@ Call the submit_explanation tool with your answer.`;
 
 export async function generateExplanation(
   ctx: CandidateContext,
-  model = "claude-sonnet-4-6",
+  model = "claude-sonnet-5",
 ): Promise<ExplanationGenerated> {
   const message = await client.messages.create({
     model,
@@ -193,7 +193,8 @@ export async function generateExplanation(
   });
 
   const toolUse = message.content.find(
-    (block): block is Anthropic.ToolUseBlock => block.type === "tool_use",
+    (block: { type: string }): block is Anthropic.ToolUseBlock =>
+      block.type === "tool_use",
   );
 
   if (!toolUse) {
