@@ -79,40 +79,46 @@ app.post("/pubsub/push", async (req, res) => {
     )) as PriceAnomalyDetected | undefined;
 
     const citedArticles: NewsArticleIngested[] = [];
-    let citedSentiment: SentimentSnapshotIngested | null = null;
+    const citedSentiments: SentimentSnapshotIngested[] = [];
     for (const id of explanation.cited_event_ids) {
       const event = await store.getById(id);
       if (event?.type === "NewsArticleIngested") {
         citedArticles.push(event);
       } else if (event?.type === "SentimentSnapshotIngested") {
-        citedSentiment = event;
+        citedSentiments.push(event);
       }
     }
 
     const sourceCount =
-      new Set(citedArticles.map((a) => a.source)).size +
-      (citedSentiment ? 1 : 0); // sentiment counts as its own independent source
+      new Set(citedArticles.map((a) => a.source)).size + citedSentiments.length; // each cited sentiment snapshot counts as its own independent source
 
     const articleSentimentResults = anomaly
       ? citedArticles.map((a) => checkSentimentCoherence(a, anomaly.price_direction))
       : [];
 
-    // Direct numeric coherence check for a cited sentiment snapshot -
+    // Direct numeric coherence check for each cited sentiment snapshot -
     // more precise than the lexicon-based article check since we have
-    // an actual -1..+1 score, not just keyword matching.
-    let sentimentSnapshotCoherent: boolean | null = null;
-    if (citedSentiment && anomaly) {
-      const isBullish = citedSentiment.sentiment_score > 0.15;
-      const isBearish = citedSentiment.sentiment_score < -0.15;
-      sentimentSnapshotCoherent =
-        (!isBullish && !isBearish) || // neutral can't contradict
-        (isBullish && anomaly.price_direction === "up") ||
-        (isBearish && anomaly.price_direction === "down");
+    // an actual -1..+1 score, not just keyword matching. A snapshot
+    // cited alongside a contradictory one (e.g. bullish ticker-specific
+    // + bearish market-wide) correctly makes the overall signal
+    // incoherent - that disagreement is itself informative, not
+    // something to average away.
+    const sentimentSnapshotCoherenceResults: boolean[] = [];
+    if (anomaly) {
+      for (const s of citedSentiments) {
+        const isBullish = s.sentiment_score > 0.15;
+        const isBearish = s.sentiment_score < -0.15;
+        const coherent =
+          (!isBullish && !isBearish) || // neutral can't contradict
+          (isBullish && anomaly.price_direction === "up") ||
+          (isBearish && anomaly.price_direction === "down");
+        sentimentSnapshotCoherenceResults.push(coherent);
+      }
     }
 
     const allCoherenceSignals = [
       ...articleSentimentResults.map((r) => r.isCoherent),
-      ...(sentimentSnapshotCoherent !== null ? [sentimentSnapshotCoherent] : []),
+      ...sentimentSnapshotCoherenceResults,
     ];
     const sentimentCoherent =
       allCoherenceSignals.length === 0
@@ -127,11 +133,16 @@ app.post("/pubsub/push", async (req, res) => {
             0
           ) / citedArticles.length;
 
+    // Scope specificity now spans BOTH citable evidence types (news and
+    // sentiment), consistent with the same ticker_specific/market_wide
+    // concept applying uniformly across whatever was actually cited -
+    // see DECISIONS.md ADR-005 and ADR-014.
+    const allCitedScoped = [...citedArticles, ...citedSentiments];
     const tickerSpecificFraction =
-      citedArticles.length === 0
+      allCitedScoped.length === 0
         ? 0
-        : citedArticles.filter((a) => a.scope === "ticker_specific").length /
-          citedArticles.length;
+        : allCitedScoped.filter((e) => e.scope === "ticker_specific").length /
+          allCitedScoped.length;
 
     // News volume signal - uses the REAL count of news fetched by
     // agent-svc at the time (passed through the event), not an
@@ -145,11 +156,10 @@ app.post("/pubsub/push", async (req, res) => {
 
     const semanticCheckContent = [
       ...citedArticles.map((a) => `${a.headline}: ${a.summary}`),
-      ...(citedSentiment
-        ? [
-            `Reddit sentiment: score=${citedSentiment.sentiment_score.toFixed(2)} (-1 bearish to +1 bullish), trend=${citedSentiment.trend}, buzz=${citedSentiment.buzz_score}/100`,
-          ]
-        : []),
+      ...citedSentiments.map(
+        (s) =>
+          `Reddit sentiment (${s.scope}): score=${s.sentiment_score.toFixed(2)} (-1 bearish to +1 bullish), trend=${s.trend}, buzz=${s.buzz_score}/100`
+      ),
     ];
     const semanticSupport =
       semanticCheckContent.length > 0

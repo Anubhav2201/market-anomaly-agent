@@ -49,7 +49,9 @@ let retriedCount = 0;
  * statistical noise, and we're not asking a model to invent a cause for
  * a move that's too small to reliably have one.
  */
-async function publishSkippedAlert(anomaly: PriceAnomalyDetected): Promise<void> {
+async function publishSkippedAlert(
+  anomaly: PriceAnomalyDetected,
+): Promise<void> {
   const alert: AlertReady = {
     type: "AlertReady",
     event_id: uuidv4(),
@@ -59,9 +61,9 @@ async function publishSkippedAlert(anomaly: PriceAnomalyDetected): Promise<void>
     explanation_event_id: "", // none generated - explanation agent was never called
     claim: "not_attempted_small_magnitude",
     human_summary: `${anomaly.ticker} moved (price_z=${anomaly.price_z_score.toFixed(
-      2
+      2,
     )}, volume_z=${anomaly.volume_z_score.toFixed(
-      2
+      2,
     )}). Magnitude is below the explanation threshold, so no cause was investigated.`,
     structurally_grounded: false,
     composite_confidence: 0,
@@ -87,8 +89,12 @@ async function publishSkippedAlert(anomaly: PriceAnomalyDetected): Promise<void>
 async function explainWithRetries(
   anomaly: PriceAnomalyDetected,
   candidateNews: NewsArticleIngested[],
-  maxRetries: number
-): Promise<{ explanation: ExplanationGenerated; attempts: number; rejections: string[][] }> {
+  maxRetries: number,
+): Promise<{
+  explanation: ExplanationGenerated;
+  attempts: number;
+  rejections: string[][];
+}> {
   const priorRejections: string[][] = [];
   const totalAttempts = maxRetries + 1;
 
@@ -104,14 +110,22 @@ async function explainWithRetries(
         volume: 0,
       })),
       candidateNews,
-      sentimentSnapshot: await sentimentIngestion.getSnapshot(anomaly.ticker),
+      sentimentSnapshots: (
+        await Promise.all([
+          sentimentIngestion.getSnapshot(anomaly.ticker),
+          sentimentIngestion.getMarketSnapshot(),
+        ])
+      ).filter((s): s is NonNullable<typeof s> => s !== null),
       priorRejections,
     });
 
     // An honest "no explanation found" is always accepted immediately -
     // nothing to retry against. Still persisted for the audit trail, same
     // as every other explanation.
-    if (explanation.claim === "no_clear_cause" || explanation.cited_event_ids.length === 0) {
+    if (
+      explanation.claim === "no_clear_cause" ||
+      explanation.cited_event_ids.length === 0
+    ) {
       await store.append(explanation);
       return { explanation, attempts: attempt, rejections: priorRejections };
     }
@@ -137,10 +151,12 @@ async function explainWithRetries(
 
     // Decide -> retry: feed the specific rejection reason back to the
     // model for the next attempt.
-    priorRejections.push([verdict.failure_reason ?? "structural grounding check failed"]);
+    priorRejections.push([
+      verdict.failure_reason ?? "structural grounding check failed",
+    ]);
     retriedCount++;
     console.log(
-      `[agent-svc] attempt ${attempt} REJECTED for ${anomaly.ticker}: ${verdict.failure_reason} - retrying`
+      `[agent-svc] attempt ${attempt} REJECTED for ${anomaly.ticker}: ${verdict.failure_reason} - retrying`,
     );
   }
 
@@ -160,12 +176,12 @@ app.post("/pubsub/push", async (req, res) => {
 
   try {
     console.log(
-      `[agent-svc] processing anomaly: ${anomaly.ticker} priceZ=${anomaly.price_z_score.toFixed(2)}`
+      `[agent-svc] processing anomaly: ${anomaly.ticker} priceZ=${anomaly.price_z_score.toFixed(2)}`,
     );
 
     const { tier, maxRetries } = classifyAnomalyTier(
       anomaly.price_z_score,
-      anomaly.volume_z_score
+      anomaly.volume_z_score,
     );
 
     if (tier === "small") {
@@ -175,14 +191,16 @@ app.post("/pubsub/push", async (req, res) => {
       // have to catch anyway.
       await publishSkippedAlert(anomaly);
       skippedSmallCount++;
-      console.log(`[agent-svc] SKIPPED (tier=small): ${anomaly.ticker} - stat reported, no LLM call`);
+      console.log(
+        `[agent-svc] SKIPPED (tier=small): ${anomaly.ticker} - stat reported, no LLM call`,
+      );
       res.status(200).send();
       return;
     }
 
     const allNews = await fetchRecentNews(anomaly.ticker, 10);
     const candidateNews: NewsArticleIngested[] = allNews.filter(
-      (n) => n.timestamp <= anomaly.timestamp
+      (n) => n.timestamp <= anomaly.timestamp,
     );
     // Persist candidate news to Firestore so grounding-svc can look up
     // cited event_ids later - the whole point of the grounding check is
@@ -195,7 +213,7 @@ app.post("/pubsub/push", async (req, res) => {
     const { explanation, attempts, rejections } = await explainWithRetries(
       anomaly,
       candidateNews,
-      maxRetries
+      maxRetries,
     );
 
     await publishEvent(EXPLANATIONS_TOPIC, explanation);
@@ -204,7 +222,9 @@ app.post("/pubsub/push", async (req, res) => {
     console.log(
       `[agent-svc] explanation generated (tier=${tier}, attempts=${attempts}/${maxRetries + 1}): ` +
         `claim="${explanation.claim}" cited=${explanation.cited_event_ids.length}` +
-        (rejections.length > 0 ? ` [self-corrected after ${rejections.length} rejection(s)]` : "")
+        (rejections.length > 0
+          ? ` [self-corrected after ${rejections.length} rejection(s)]`
+          : ""),
     );
     res.status(200).send();
   } catch (err) {
@@ -220,7 +240,9 @@ app.get("/health", (req, res) => {
 });
 
 if (!process.env.ANTHROPIC_API_KEY) {
-  console.error("[agent-svc] ANTHROPIC_API_KEY is not set - explanations will fail.");
+  console.error(
+    "[agent-svc] ANTHROPIC_API_KEY is not set - explanations will fail.",
+  );
 }
 
 const port = process.env.PORT || 8080;

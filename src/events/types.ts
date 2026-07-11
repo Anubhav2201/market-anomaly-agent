@@ -123,14 +123,31 @@ export interface AlertReady extends BaseEvent {
  * requests/month, so per-anomaly fetching would exhaust it almost
  * immediately. The cached snapshot's event_id is what gets handed to
  * the agent as a citable candidate, same pattern as news articles.
+ *
+ * `scope` mirrors NewsArticleIngested.scope (see ADR-005 in
+ * DECISIONS.md): "ticker_specific" comes from
+ * GET /reddit/crypto/v1/token/{symbol} (this ticker's own Reddit
+ * buzz); "market_wide" comes from
+ * GET /reddit/crypto/v1/market-sentiment (aggregate crypto-wide mood,
+ * not specific to any one ticker - see ADR-013/ADR-014). Both are
+ * cached hourly and both get handed to the explanation agent as
+ * separate, distinctly-scoped candidates.
  */
 export interface SentimentSnapshotIngested extends BaseEvent {
   type: "SentimentSnapshotIngested";
   source: "adanos-reddit-crypto";
+  scope: "ticker_specific" | "market_wide";
   buzz_score: number; // 0-100
   sentiment_score: number; // -1 (bearish) to +1 (bullish)
   trend: "rising" | "falling" | "stable";
   mention_count: number;
+  /**
+   * Only present on market_wide snapshots - the top symbols driving
+   * overall crypto sentiment, straight from Adanos' `drivers[]` field.
+   * Not used for grounding/citation (the snapshot's own event_id is
+   * what's cited), purely descriptive context for the prompt.
+   */
+  drivers?: { symbol: string; mentions: number; buzz_score: number; sentiment_score: number }[];
 }
 
 export type DomainEvent =

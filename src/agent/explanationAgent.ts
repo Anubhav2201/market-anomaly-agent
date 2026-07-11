@@ -61,7 +61,13 @@ interface CandidateContext {
   anomaly: PriceAnomalyDetected;
   recentTicks: PriceTick[]; // small window of price history for context
   candidateNews: NewsArticleIngested[]; // must be BEFORE anomaly.timestamp
-  sentimentSnapshot?: SentimentSnapshotIngested | null; // optional, cached hourly
+  /**
+   * Sentiment candidates - can include a ticker_specific snapshot (this
+   * ticker's own Reddit buzz) and/or a market_wide snapshot (aggregate
+   * crypto-wide mood, see ADR-014 in DECISIONS.md), same scope concept
+   * as candidateNews. Both are optional and independently cached.
+   */
+  sentimentSnapshots?: SentimentSnapshotIngested[];
   /**
    * Feedback from previously REJECTED attempts on this same anomaly (used
    * by the bounded retry loop in agent-svc for "large" tier anomalies).
@@ -78,7 +84,8 @@ function buildFeedbackSection(priorRejections?: string[][]): string {
   const attempts = priorRejections
     .map(
       (reasons, i) =>
-        `Attempt ${i + 1} was REJECTED for:\n` + reasons.map((r) => `  - ${r}`).join("\n")
+        `Attempt ${i + 1} was REJECTED for:\n` +
+        reasons.map((r) => `  - ${r}`).join("\n"),
     )
     .join("\n");
   return `\nIMPORTANT - this anomaly has already been attempted and rejected ${priorRejections.length} time(s):
@@ -91,7 +98,7 @@ empty cited_event_ids array rather than repeating a rejected citation.
 }
 
 function buildPrompt(ctx: CandidateContext): string {
-  const { anomaly, recentTicks, candidateNews, sentimentSnapshot } = ctx;
+  const { anomaly, recentTicks, candidateNews, sentimentSnapshots } = ctx;
 
   const tickSummary = recentTicks
     .slice(-10)
@@ -103,16 +110,38 @@ function buildPrompt(ctx: CandidateContext): string {
       ? candidateNews
           .map(
             (n) =>
-              `  [${n.event_id}] t=${n.timestamp} scope=${n.scope} "${n.headline}" (${n.source}): ${n.summary}`
+              `  [${n.event_id}] t=${n.timestamp} scope=${n.scope} "${n.headline}" (${n.source}): ${n.summary}`,
           )
           .join("\n")
       : "  (no candidate news articles available)";
 
-  const sentimentSummary = sentimentSnapshot
-    ? `  [${sentimentSnapshot.event_id}] Reddit crypto sentiment (cached hourly): ` +
-      `buzz_score=${sentimentSnapshot.buzz_score}/100, sentiment_score=${sentimentSnapshot.sentiment_score.toFixed(2)} ` +
-      `(-1 bearish to +1 bullish), trend=${sentimentSnapshot.trend}, mentions=${sentimentSnapshot.mention_count}`
-    : "  (no sentiment data available)";
+  const sentimentList = sentimentSnapshots ?? [];
+  const sentimentSummary =
+    sentimentList.length > 0
+      ? sentimentList
+          .map((s) => {
+            const base =
+              `  [${s.event_id}] scope=${s.scope} Reddit crypto sentiment (cached hourly): ` +
+              `buzz_score=${s.buzz_score}/100, sentiment_score=${s.sentiment_score.toFixed(2)} ` +
+              `(-1 bearish to +1 bullish), trend=${s.trend}, mentions=${s.mention_count}`;
+            if (
+              s.scope === "market_wide" &&
+              s.drivers &&
+              s.drivers.length > 0
+            ) {
+              const drivers = s.drivers
+                .slice(0, 5)
+                .map(
+                  (d) =>
+                    `${d.symbol} (mentions=${d.mentions}, sentiment=${d.sentiment_score.toFixed(2)})`,
+                )
+                .join(", ");
+              return `${base}\n      top symbols driving overall crypto sentiment: ${drivers}`;
+            }
+            return base;
+          })
+          .join("\n")
+      : "  (no sentiment data available)";
 
   return `A price anomaly was detected:
   ticker: ${anomaly.ticker}
@@ -133,13 +162,17 @@ market/macro news that could plausibly affect many assets at once
 more direct explanation):
 ${newsSummary}
 
-Reddit crypto sentiment snapshot (also citable if it's actually relevant
-to explaining this specific anomaly - e.g. a strong sentiment shift with
-no clear news cause might itself be worth citing as the explanation):
+Reddit crypto sentiment snapshots (also citable if actually relevant to
+explaining this specific anomaly). Same scope concept as news:
+ticker_specific is this ticker's own Reddit buzz; market_wide is the
+aggregate crypto-wide mood across the whole market, not specific to
+${anomaly.ticker} - if you cite a market_wide sentiment snapshot, frame
+your reasoning as a broad/systemic mood shift affecting the whole
+market, not as something specific to ${anomaly.ticker}:
 ${sentimentSummary}
 ${buildFeedbackSection(ctx.priorRejections)}
 Using ONLY the event_ids from the candidate news articles or the
-sentiment snapshot listed above (never invent an id, never cite the
+sentiment snapshots listed above (never invent an id, never cite the
 price context above - it has no id), explain why this anomaly likely
 occurred.
 If nothing actually explains it, say so honestly with claim
@@ -149,7 +182,7 @@ Call the submit_explanation tool with your answer.`;
 
 export async function generateExplanation(
   ctx: CandidateContext,
-  model = "claude-sonnet-4-6"
+  model = "claude-sonnet-4-6",
 ): Promise<ExplanationGenerated> {
   const message = await client.messages.create({
     model,
@@ -160,12 +193,12 @@ export async function generateExplanation(
   });
 
   const toolUse = message.content.find(
-    (block): block is Anthropic.ToolUseBlock => block.type === "tool_use"
+    (block): block is Anthropic.ToolUseBlock => block.type === "tool_use",
   );
 
   if (!toolUse) {
     throw new Error(
-      "Claude did not return a tool_use block - unexpected given tool_choice was forced"
+      "Claude did not return a tool_use block - unexpected given tool_choice was forced",
     );
   }
 
