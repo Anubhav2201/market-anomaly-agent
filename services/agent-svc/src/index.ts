@@ -13,11 +13,16 @@
  * since each anomaly is handled independently.
  */
 import express from "express";
-import { fetchRecentNews } from "../../../src/news/newsIngestion";
+import { NewsCache } from "../../../src/news/newsCache";
 import { generateExplanation } from "../../../src/agent/explanationAgent";
+import { ExplanationCache } from "../../../src/agent/explanationCache";
 import { FirestoreEventStore } from "../../../src/events/firestoreStore";
 import { AsyncGroundingVerifier } from "../../../src/agent/groundingVerifierAsync";
-import { classifyAnomalyTier } from "../../../src/detector/anomalyTiering";
+import {
+  classifyAnomalyTier,
+  selectModelForTier,
+} from "../../../src/detector/anomalyTiering";
+import { AnomalyCooldownTracker } from "../../../src/detector/anomalyCooldown";
 import { SentimentIngestion } from "../../../src/sentiment/sentimentIngestion";
 import {
   PriceAnomalyDetected,
@@ -34,11 +39,16 @@ const ALERTS_TOPIC = "alerts";
 const store = new FirestoreEventStore();
 const groundingVerifier = new AsyncGroundingVerifier(store);
 const sentimentIngestion = new SentimentIngestion(store);
+const newsCache = new NewsCache(store);
+const explanationCache = new ExplanationCache(store);
+const cooldownTracker = new AnomalyCooldownTracker();
 const app = express();
 app.use(express.json());
 
 let processedCount = 0;
 let skippedSmallCount = 0;
+let skippedCooldownCount = 0;
+let reusedExplanationCount = 0;
 let retriedCount = 0;
 
 /**
@@ -89,7 +99,11 @@ async function publishSkippedAlert(
 async function explainWithRetries(
   anomaly: PriceAnomalyDetected,
   candidateNews: NewsArticleIngested[],
+  sentimentSnapshots: Awaited<
+    ReturnType<typeof sentimentIngestion.getSnapshot>
+  >[],
   maxRetries: number,
+  model: string,
 ): Promise<{
   explanation: ExplanationGenerated;
   attempts: number;
@@ -97,27 +111,32 @@ async function explainWithRetries(
 }> {
   const priorRejections: string[][] = [];
   const totalAttempts = maxRetries + 1;
+  // NOTE: sentimentSnapshots is now fetched ONCE by the caller and passed
+  // in, not re-fetched on every retry attempt - it doesn't change between
+  // attempts (only the rejection feedback does), so re-fetching it per
+  // attempt was pure waste (extra Firestore reads for identical data).
+  const resolvedSentiment = sentimentSnapshots.filter(
+    (s): s is NonNullable<typeof s> => s !== null,
+  );
 
   for (let attempt = 1; attempt <= totalAttempts; attempt++) {
-    const explanation = await generateExplanation({
-      anomaly,
-      recentTicks: anomaly.recent_price_context.map((p) => ({
-        type: "PriceTick" as const,
-        event_id: `embedded-${p.timestamp}`,
-        ticker: anomaly.ticker,
-        timestamp: p.timestamp,
-        price: p.price,
-        volume: 0,
-      })),
-      candidateNews,
-      sentimentSnapshots: (
-        await Promise.all([
-          sentimentIngestion.getSnapshot(anomaly.ticker),
-          sentimentIngestion.getMarketSnapshot(),
-        ])
-      ).filter((s): s is NonNullable<typeof s> => s !== null),
-      priorRejections,
-    });
+    const explanation = await generateExplanation(
+      {
+        anomaly,
+        recentTicks: anomaly.recent_price_context.map((p) => ({
+          type: "PriceTick" as const,
+          event_id: `embedded-${p.timestamp}`,
+          ticker: anomaly.ticker,
+          timestamp: p.timestamp,
+          price: p.price,
+          volume: 0,
+        })),
+        candidateNews,
+        sentimentSnapshots: resolvedSentiment,
+        priorRejections,
+      },
+      model,
+    );
 
     // An honest "no explanation found" is always accepted immediately -
     // nothing to retry against. Still persisted for the audit trail, same
@@ -183,12 +202,19 @@ app.post("/pubsub/push", async (req, res) => {
       anomaly.price_z_score,
       anomaly.volume_z_score,
     );
+    // Medium tier -> Haiku 4.5 (cheap, sufficient for a bounded citation
+    // task); large tier -> the more capable model, since that's where
+    // the retry loop's fabrication-risk stakes are highest. See
+    // selectModelForTier() in anomalyTiering.ts for the full reasoning.
+    const model = selectModelForTier(tier);
 
     if (tier === "small") {
       // Skip the explanation agent entirely - cheap statistical noise
       // isn't worth an LLM call, and forcing an explanation for it risks
       // a false-positive causal link the grounding checks would then
-      // have to catch anyway.
+      // have to catch anyway. Small tier is already cheap enough that
+      // cooldown suppression isn't worth applying here too - see below
+      // for where cooldown actually matters (medium/large).
       await publishSkippedAlert(anomaly);
       skippedSmallCount++;
       console.log(
@@ -198,29 +224,137 @@ app.post("/pubsub/push", async (req, res) => {
       return;
     }
 
-    const allNews = await fetchRecentNews(anomaly.ticker, 10);
+    // Cooldown check - the highest-impact cost lever in this pipeline.
+    // A sustained price move doesn't fire the detector once; EWMA/MAD
+    // can stay past threshold across many consecutive ticks, and
+    // without this check EACH of those ticks would independently fetch
+    // news, fetch sentiment, and call Claude for what is, causally, ONE
+    // event. Tier escalation still breaks through - see
+    // anomalyCooldown.ts for the full reasoning.
+    const shouldProcess = await cooldownTracker.shouldProcess(
+      anomaly.ticker,
+      tier,
+    );
+    if (!shouldProcess) {
+      skippedCooldownCount++;
+      console.log(
+        `[agent-svc] SKIPPED (cooldown): ${anomaly.ticker} tier=${tier} - recently processed at this tier or higher`,
+      );
+      res.status(200).send();
+      return;
+    }
+
+    const allNews = await newsCache.getRecentNews(anomaly.ticker, 10);
     const candidateNews: NewsArticleIngested[] = allNews.filter(
       (n) => n.timestamp <= anomaly.timestamp,
     );
-    // Persist candidate news to Firestore so grounding-svc can look up
-    // cited event_ids later - the whole point of the grounding check is
-    // that citations resolve against DURABLE storage, not this
-    // request's local memory.
-    for (const n of candidateNews) {
-      await store.append(n);
+    // NOTE: no manual persistence loop here anymore - NewsCache already
+    // persists every fetched article (and dedups by URL) internally,
+    // so re-appending here would just be redundant Firestore writes.
+    // See src/news/newsCache.ts.
+
+    // Fetch sentiment ONCE here (not per-retry-attempt, see
+    // explainWithRetries) - also lets us check below whether there's
+    // ANYTHING at all to reason about before paying for a Claude call.
+    const sentimentSnapshots = await Promise.all([
+      sentimentIngestion.getSnapshot(anomaly.ticker),
+      sentimentIngestion.getMarketSnapshot(),
+    ]);
+    const resolvedSentiment = sentimentSnapshots.filter(
+      (s): s is NonNullable<typeof s> => s !== null,
+    );
+
+    if (candidateNews.length === 0 && resolvedSentiment.length === 0) {
+      // Deterministic skip: with ZERO candidate news and ZERO sentiment
+      // data, the only valid outcome Claude could produce is an honest
+      // no_clear_cause with empty citations - there is nothing else it
+      // could validly cite. Synthesizing that directly costs nothing
+      // and produces the identical result a real Claude call would
+      // have, every time. This is exactly the DOT-USD test case from
+      // earlier live testing - a quiet ticker with no news and no
+      // sentiment always ends here anyway; skipping saves the call.
+      const explanation: ExplanationGenerated = {
+        type: "ExplanationGenerated",
+        event_id: uuidv4(),
+        ticker: anomaly.ticker,
+        timestamp: Date.now(),
+        anomaly_event_id: anomaly.event_id,
+        claim: "no_clear_cause",
+        human_summary: `${anomaly.ticker} moved (price_z=${anomaly.price_z_score.toFixed(
+          2,
+        )}, volume_z=${anomaly.volume_z_score.toFixed(
+          2,
+        )}) but no news articles or sentiment data were available to explain it.`,
+        cited_event_ids: [],
+        confidence: 0,
+        candidate_news_count: 0,
+      };
+      await store.append(explanation);
+      await publishEvent(EXPLANATIONS_TOPIC, explanation);
+      await cooldownTracker.recordProcessed(anomaly.ticker, tier);
+      processedCount++;
+      console.log(
+        `[agent-svc] SKIPPED (no candidates): ${anomaly.ticker} tier=${tier} - deterministic no_clear_cause, no Claude call made`,
+      );
+      res.status(200).send();
+      return;
+    }
+
+    const candidateIds = [
+      ...candidateNews.map((n) => n.event_id),
+      ...resolvedSentiment.map((s) => s.event_id),
+    ];
+
+    // Explanation reuse: if a different anomaly (e.g. after a cooldown
+    // window lapsed) was recently explained from this EXACT same set
+    // of candidate news/sentiment, reuse that reasoning instead of
+    // paying for another Claude call - see explanationCache.ts for why
+    // this is narrower than (and complements, not replaces) the
+    // cooldown tracker.
+    const reused = await explanationCache.lookup(anomaly, tier, candidateIds);
+    if (reused) {
+      await store.append(reused);
+      await publishEvent(EXPLANATIONS_TOPIC, reused);
+      await cooldownTracker.recordProcessed(anomaly.ticker, tier);
+      reusedExplanationCount++;
+      processedCount++;
+      console.log(
+        `[agent-svc] REUSED (explanation cache): ${anomaly.ticker} tier=${tier} - identical candidate set, no Claude call made`,
+      );
+      res.status(200).send();
+      return;
     }
 
     const { explanation, attempts, rejections } = await explainWithRetries(
       anomaly,
       candidateNews,
+      sentimentSnapshots,
       maxRetries,
+      model,
     );
 
+    // Cache this reasoning against its candidate-set fingerprint for
+    // potential reuse by a future anomaly with the identical set -
+    // only worth caching non-trivial outcomes (an explanation that
+    // actually cited something), since a fresh no_clear_cause is
+    // already free to produce again via the zero-candidate skip above
+    // if the candidate set is later genuinely empty.
+    if (explanation.cited_event_ids.length > 0) {
+      await explanationCache.store(
+        anomaly.ticker,
+        anomaly.price_direction,
+        tier,
+        candidateIds,
+        explanation,
+      );
+    }
+
     await publishEvent(EXPLANATIONS_TOPIC, explanation);
+    await cooldownTracker.recordProcessed(anomaly.ticker, tier);
 
     processedCount++;
     console.log(
-      `[agent-svc] explanation generated (tier=${tier}, attempts=${attempts}/${maxRetries + 1}): ` +
+      `[agent-svc] explanation generated (tier=${tier}, model=${model}, attempts=${attempts}/${maxRetries + 1}): ` +
         `claim="${explanation.claim}" cited=${explanation.cited_event_ids.length}` +
         (rejections.length > 0
           ? ` [self-corrected after ${rejections.length} rejection(s)]`
@@ -236,7 +370,14 @@ app.post("/pubsub/push", async (req, res) => {
 });
 
 app.get("/health", (req, res) => {
-  res.json({ status: "ok", processedCount, skippedSmallCount, retriedCount });
+  res.json({
+    status: "ok",
+    processedCount,
+    skippedSmallCount,
+    skippedCooldownCount,
+    reusedExplanationCount,
+    retriedCount,
+  });
 });
 
 if (!process.env.ANTHROPIC_API_KEY) {

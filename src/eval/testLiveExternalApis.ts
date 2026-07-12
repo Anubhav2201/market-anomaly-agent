@@ -46,10 +46,7 @@ import { generateExplanation } from "../agent/explanationAgent";
 import { EventStore } from "../events/store";
 import { GroundingVerifier } from "../agent/groundingVerifier";
 import { verifyClaimSupportedByContent } from "../signals/semanticVerifier";
-import {
-  computeConfidence,
-  temporalProximityScore,
-} from "../signals/confidenceScorer";
+import { computeConfidence, temporalProximityScore } from "../signals/confidenceScorer";
 import { checkSentimentCoherence } from "../signals/sentimentCoherence";
 import {
   NewsArticleIngested,
@@ -66,14 +63,10 @@ const ADANOS_BASE_URL = "https://api.adanos.org";
  * thrown error) on any failure, same "confidence booster, not a hard
  * requirement" philosophy as the rest of the pipeline.
  */
-async function fetchSentimentOnce(
-  ticker: string,
-): Promise<SentimentSnapshotIngested | null> {
+async function fetchSentimentOnce(ticker: string): Promise<SentimentSnapshotIngested | null> {
   const apiKey = process.env.ADANOS_API_KEY;
   if (!apiKey) {
-    console.log(
-      "[sentiment] ADANOS_API_KEY not set - skipping (0 Adanos calls made)",
-    );
+    console.log("[sentiment] ADANOS_API_KEY not set - skipping (0 Adanos calls made)");
     return null;
   }
 
@@ -85,24 +78,18 @@ async function fetchSentimentOnce(
     const res = await fetch(url, { headers: { "X-API-Key": apiKey } });
 
     if (res.status === 404) {
-      console.log(
-        `[sentiment] 404 - "${symbol}" is not a supported crypto symbol on Adanos`,
-      );
+      console.log(`[sentiment] 404 - "${symbol}" is not a supported crypto symbol on Adanos`);
       return null;
     }
     if (!res.ok) {
-      console.error(
-        `[sentiment] HTTP ${res.status} - treating as no sentiment data`,
-      );
+      console.error(`[sentiment] HTTP ${res.status} - treating as no sentiment data`);
       return null;
     }
     const data = await res.json();
     console.log("[sentiment] raw response:", JSON.stringify(data, null, 2));
 
     if (data.found === false) {
-      console.log(
-        `[sentiment] "${symbol}" supported but no data this window (found:false) - not an error`,
-      );
+      console.log(`[sentiment] "${symbol}" supported but no data this window (found:false) - not an error`);
       return null;
     }
 
@@ -115,10 +102,7 @@ async function fetchSentimentOnce(
       scope: "ticker_specific",
       buzz_score: data.buzz_score ?? 0,
       sentiment_score: data.sentiment_score ?? 0,
-      trend:
-        data.trend === "rising" || data.trend === "falling"
-          ? data.trend
-          : "stable",
+      trend: data.trend === "rising" || data.trend === "falling" ? data.trend : "stable",
       mention_count: data.mentions ?? 0,
     };
   } catch (err) {
@@ -136,29 +120,20 @@ async function fetchMarketSentimentOnce(): Promise<SentimentSnapshotIngested | n
   const apiKey = process.env.ADANOS_API_KEY;
   if (!apiKey) return null;
   if (process.env.FETCH_MARKET_SENTIMENT !== "1") {
-    console.log(
-      "[market-sentiment] FETCH_MARKET_SENTIMENT not set to 1 - skipping (0 extra Adanos calls made)",
-    );
+    console.log("[market-sentiment] FETCH_MARKET_SENTIMENT not set to 1 - skipping (0 extra Adanos calls made)");
     return null;
   }
 
   const url = `${ADANOS_BASE_URL}/reddit/crypto/v1/market-sentiment`;
-  console.log(
-    `[market-sentiment] making the OPT-IN second Adanos call: GET ${url}`,
-  );
+  console.log(`[market-sentiment] making the OPT-IN second Adanos call: GET ${url}`);
   try {
     const res = await fetch(url, { headers: { "X-API-Key": apiKey } });
     if (!res.ok) {
-      console.error(
-        `[market-sentiment] HTTP ${res.status} - treating as no data`,
-      );
+      console.error(`[market-sentiment] HTTP ${res.status} - treating as no data`);
       return null;
     }
     const data = await res.json();
-    console.log(
-      "[market-sentiment] raw response:",
-      JSON.stringify(data, null, 2),
-    );
+    console.log("[market-sentiment] raw response:", JSON.stringify(data, null, 2));
 
     return {
       type: "SentimentSnapshotIngested",
@@ -169,10 +144,7 @@ async function fetchMarketSentimentOnce(): Promise<SentimentSnapshotIngested | n
       scope: "market_wide",
       buzz_score: data.buzz_score ?? 0,
       sentiment_score: data.sentiment_score ?? 0,
-      trend:
-        data.trend === "rising" || data.trend === "falling"
-          ? data.trend
-          : "stable",
+      trend: data.trend === "rising" || data.trend === "falling" ? data.trend : "stable",
       mention_count: data.mentions ?? 0,
       drivers: data.drivers ?? [],
     };
@@ -187,19 +159,13 @@ async function main() {
   const skipSemantic = process.env.SKIP_SEMANTIC_CHECK === "1";
 
   if (!process.env.ANTHROPIC_API_KEY) {
-    console.error(
-      "ANTHROPIC_API_KEY is required (this test makes exactly 1 real Claude call).",
-    );
+    console.error("ANTHROPIC_API_KEY is required (this test makes exactly 1 real Claude call).");
     process.exit(1);
   }
 
   console.log(`=== Live external API smoke test for ${ticker} ===\n`);
-  console.log(
-    "This makes AT MOST: 1 Adanos call, 2 news HTTP requests (1 fetchRecentNews call),",
-  );
-  console.log(
-    "1 Claude call, and 0-1 Groq calls. No Firestore/Pub-Sub writes.\n",
-  );
+  console.log("This makes AT MOST: 1 Adanos call, 2 news HTTP requests (1 fetchRecentNews call),");
+  console.log("1 Claude call, and 0-1 Groq calls. No Firestore/Pub-Sub writes.\n");
 
   // --- Step 1: news (1 fetchRecentNews call = 2 HTTP requests internally) ---
   console.log(`[news] making the ONE fetchRecentNews call for ${ticker}...`);
@@ -207,23 +173,21 @@ async function main() {
   console.log(
     `[news] got ${allNews.length} article(s): ` +
       `${allNews.filter((n) => n.scope === "ticker_specific").length} ticker_specific, ` +
-      `${allNews.filter((n) => n.scope === "market_wide").length} market_wide`,
+      `${allNews.filter((n) => n.scope === "market_wide").length} market_wide`
   );
   // Full detail for EVERY fetched article, not just a truncated preview -
   // this is what you actually want to eyeball to sanity-check the real
   // Tiingo response against what scopeClassifier.ts assigned.
   allNews.forEach((n, i) => {
     console.log(
-      `  [${i + 1}] event_id=${n.event_id} scope=${n.scope} t=${new Date(n.timestamp).toISOString()}`,
+      `  [${i + 1}] event_id=${n.event_id} scope=${n.scope} t=${new Date(n.timestamp).toISOString()}`
     );
     console.log(`      headline: "${n.headline}"`);
     console.log(`      source: ${n.source}`);
     console.log(`      summary: ${n.summary}`);
   });
   if (allNews.length === 0) {
-    console.log(
-      "  (no articles returned - check TIINGO_API_KEY is set and the ticker symbol)",
-    );
+    console.log("  (no articles returned - check TIINGO_API_KEY is set and the ticker symbol)");
   }
 
   // --- Step 2: sentiment (0-2 Adanos calls: 1 ticker-specific always attempted, 1 market-wide opt-in) ---
@@ -233,31 +197,27 @@ async function main() {
     fetchMarketSentimentOnce(),
   ]);
   const sentimentSnapshots = [tickerSentiment, marketSentiment].filter(
-    (s): s is SentimentSnapshotIngested => s !== null,
+    (s): s is SentimentSnapshotIngested => s !== null
   );
   if (tickerSentiment) {
     console.log(
       `[sentiment] event_id=${tickerSentiment.event_id} scope=${tickerSentiment.scope} ` +
         `buzz=${tickerSentiment.buzz_score}, sentiment=${tickerSentiment.sentiment_score.toFixed(2)}, ` +
-        `trend=${tickerSentiment.trend}, mentions=${tickerSentiment.mention_count}`,
+        `trend=${tickerSentiment.trend}, mentions=${tickerSentiment.mention_count}`
     );
   } else {
-    console.log(
-      "[sentiment] no ticker-specific sentiment data (see reason logged above)",
-    );
+    console.log("[sentiment] no ticker-specific sentiment data (see reason logged above)");
   }
   if (marketSentiment) {
     console.log(
       `[market-sentiment] event_id=${marketSentiment.event_id} scope=${marketSentiment.scope} ` +
         `buzz=${marketSentiment.buzz_score}, sentiment=${marketSentiment.sentiment_score.toFixed(2)}, ` +
-        `trend=${marketSentiment.trend}, mentions=${marketSentiment.mention_count}`,
+        `trend=${marketSentiment.trend}, mentions=${marketSentiment.mention_count}`
     );
     if (marketSentiment.drivers && marketSentiment.drivers.length > 0) {
       console.log("      top drivers:");
       marketSentiment.drivers.forEach((d) =>
-        console.log(
-          `        ${d.symbol}: mentions=${d.mentions}, buzz=${d.buzz_score}, sentiment=${d.sentiment_score.toFixed(2)}`,
-        ),
+        console.log(`        ${d.symbol}: mentions=${d.mentions}, buzz=${d.buzz_score}, sentiment=${d.sentiment_score.toFixed(2)}`)
       );
     }
   }
@@ -270,14 +230,10 @@ async function main() {
 
   console.log(
     `\n[candidates] ${candidateNews.length}/${allNews.length} news article(s) pass the causality filter ` +
-      `(timestamp <= anomaly) and are handed to Claude as citable candidates:`,
+      `(timestamp <= anomaly) and are handed to Claude as citable candidates:`
   );
-  candidateNews.forEach((n) =>
-    console.log(`  - [${n.event_id}] [${n.scope}] "${n.headline}"`),
-  );
-  sentimentSnapshots.forEach((s) =>
-    console.log(`  - [${s.event_id}] [${s.scope}] Reddit sentiment snapshot`),
-  );
+  candidateNews.forEach((n) => console.log(`  - [${n.event_id}] [${n.scope}] "${n.headline}"`));
+  sentimentSnapshots.forEach((s) => console.log(`  - [${s.event_id}] [${s.scope}] Reddit sentiment snapshot`));
 
   // Synthetic but internally consistent placeholder values - NOT price=0,
   // which real-world testing showed Claude (correctly) interpreting as a
@@ -334,9 +290,7 @@ async function main() {
   });
   console.log(`[claude] claim: "${explanation.claim}"`);
   console.log(`[claude] human_summary: ${explanation.human_summary}`);
-  console.log(
-    `[claude] cited_event_ids: [${explanation.cited_event_ids.join(", ")}]`,
-  );
+  console.log(`[claude] cited_event_ids: [${explanation.cited_event_ids.join(", ")}]`);
   console.log(`[claude] self-reported confidence: ${explanation.confidence}`);
 
   // Resolve each cited id back to what it actually is, so you can eyeball
@@ -348,17 +302,11 @@ async function main() {
       const article = candidateNews.find((n) => n.event_id === id);
       const sentiment = sentimentSnapshots.find((s) => s.event_id === id);
       if (article) {
-        console.log(
-          `    [${id}] news (${article.scope}): "${article.headline}"`,
-        );
+        console.log(`    [${id}] news (${article.scope}): "${article.headline}"`);
       } else if (sentiment) {
-        console.log(
-          `    [${id}] sentiment (${sentiment.scope}): score=${sentiment.sentiment_score.toFixed(2)}`,
-        );
+        console.log(`    [${id}] sentiment (${sentiment.scope}): score=${sentiment.sentiment_score.toFixed(2)}`);
       } else {
-        console.log(
-          `    [${id}] *** DOES NOT MATCH ANY CANDIDATE - would fail grounding ***`,
-        );
+        console.log(`    [${id}] *** DOES NOT MATCH ANY CANDIDATE - would fail grounding ***`);
       }
     }
   }
@@ -374,21 +322,17 @@ async function main() {
   const verdict = verifier.verifyStructural(explanation);
   console.log(
     `\n[grounding] structurally_grounded: ${verdict.structurally_grounded}` +
-      (verdict.failure_reason ? ` (${verdict.failure_reason})` : ""),
+      (verdict.failure_reason ? ` (${verdict.failure_reason})` : "")
   );
 
   // --- Step 6: semantic check - at most 1 Groq call ---
   let semanticSupport: boolean | null = null;
   if (skipSemantic) {
-    console.log(
-      "[semantic] SKIP_SEMANTIC_CHECK=1 - skipping (0 Groq calls made)",
-    );
+    console.log("[semantic] SKIP_SEMANTIC_CHECK=1 - skipping (0 Groq calls made)");
   } else if (explanation.cited_event_ids.length === 0) {
     console.log("[semantic] nothing cited - skipping (0 Groq calls made)");
   } else if (!process.env.GROQ_API_KEY) {
-    console.log(
-      "[semantic] GROQ_API_KEY not set - skipping (0 Groq calls made)",
-    );
+    console.log("[semantic] GROQ_API_KEY not set - skipping (0 Groq calls made)");
   } else {
     const citedContent = explanation.cited_event_ids
       .map((id) => store.getById(id))
@@ -398,13 +342,10 @@ async function main() {
           ? `${e.headline}: ${e.summary}`
           : e.type === "SentimentSnapshotIngested"
             ? `Reddit sentiment score=${e.sentiment_score}`
-            : "",
+            : ""
       );
     console.log("[semantic] making the ONE Groq call...");
-    semanticSupport = await verifyClaimSupportedByContent(
-      explanation.claim,
-      citedContent,
-    );
+    semanticSupport = await verifyClaimSupportedByContent(explanation.claim, citedContent);
     console.log(`[semantic] supported: ${semanticSupport}`);
   }
 
@@ -415,46 +356,28 @@ async function main() {
   // from "unknown/neutral" defaults, for an explanation that explicitly
   // says there IS no explanation.
   if (explanation.claim === "no_clear_cause") {
-    console.log(
-      "\n[confidence] skipped - no_clear_cause has no causal claim to score confidence on",
-    );
+    console.log("\n[confidence] skipped - no_clear_cause has no causal claim to score confidence on");
   } else {
-    const citedArticles = candidateNews.filter((n) =>
-      explanation.cited_event_ids.includes(n.event_id),
-    );
-    const sentimentResults = citedArticles.map((a) =>
-      checkSentimentCoherence(a, anomaly.price_direction),
-    );
+    const citedArticles = candidateNews.filter((n) => explanation.cited_event_ids.includes(n.event_id));
+    const sentimentResults = citedArticles.map((a) => checkSentimentCoherence(a, anomaly.price_direction));
     const confidence = computeConfidence({
       structurallyGrounded: verdict.structurally_grounded,
       newsVolumeSpike: false, // no baseline history in a one-off script
-      sentimentCoherent:
-        sentimentResults.length === 0
-          ? null
-          : sentimentResults.every((r) => r.isCoherent),
-      sourceCount:
-        new Set(citedArticles.map((a) => a.source)).size +
-        sentimentSnapshots.length,
+      sentimentCoherent: sentimentResults.length === 0 ? null : sentimentResults.every((r) => r.isCoherent),
+      sourceCount: new Set(citedArticles.map((a) => a.source)).size + sentimentSnapshots.length,
       proximityScore:
         citedArticles.length === 0
           ? 0
-          : citedArticles.reduce(
-              (s, a) =>
-                s + temporalProximityScore(a.timestamp, anomaly.timestamp),
-              0,
-            ) / citedArticles.length,
+          : citedArticles.reduce((s, a) => s + temporalProximityScore(a.timestamp, anomaly.timestamp), 0) /
+            citedArticles.length,
       semanticSupport,
       tickerSpecificFraction:
         citedArticles.length === 0
           ? 0
-          : citedArticles.filter((a) => a.scope === "ticker_specific").length /
-            citedArticles.length,
+          : citedArticles.filter((a) => a.scope === "ticker_specific").length / citedArticles.length,
     });
 
-    console.log(
-      `\n[confidence] composite: ${confidence.score.toFixed(2)}`,
-      confidence.breakdown,
-    );
+    console.log(`\n[confidence] composite: ${confidence.score.toFixed(2)}`, confidence.breakdown);
   }
   console.log("\n=== Done. No Firestore/Pub-Sub writes were made. ===");
 }

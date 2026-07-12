@@ -40,6 +40,28 @@ const MAX_RETRIES_BY_TIER: Record<AnomalyTier, number> = {
   large: 3, // bounded Plan-Act-Observe-Decide loop
 };
 
+/**
+ * Model routing by tier - a cost lever applied the same way maxRetries
+ * already is. Medium-tier anomalies are the bulk of production volume
+ * (one-shot, no retry) and this is a fairly bounded citation task -
+ * read a handful of news/sentiment candidates, decide which (if any)
+ * support the anomaly, cite the event_id. That doesn't need frontier
+ * reasoning, so it routes to the cheapest current model. Large-tier
+ * anomalies (the retry loop, highest fabrication-risk stakes - see
+ * ADR-008) keep the more capable model, since that's where schema
+ * reliability and citation judgment under repeated rejection feedback
+ * matter most.
+ */
+const MODEL_BY_TIER: Record<AnomalyTier, string> = {
+  small: "", // explanation agent never called for small tier - value unused
+  medium: "claude-haiku-4-5-20251001",
+  large: "claude-sonnet-5",
+};
+
+export function selectModelForTier(tier: AnomalyTier): string {
+  return MODEL_BY_TIER[tier];
+}
+
 export interface TieringResult {
   tier: AnomalyTier;
   maxRetries: number;
@@ -48,7 +70,7 @@ export interface TieringResult {
 export function classifyAnomalyTier(
   priceZScore: number,
   volumeZScore: number,
-  thresholds: TieringThresholds = DEFAULT_TIERING_THRESHOLDS
+  thresholds: TieringThresholds = DEFAULT_TIERING_THRESHOLDS,
 ): TieringResult {
   const maxZ = Math.max(priceZScore, volumeZScore);
   let tier: AnomalyTier;

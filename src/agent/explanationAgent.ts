@@ -25,7 +25,7 @@ import {
 
 const client = new Anthropic(); // reads ANTHROPIC_API_KEY from env
 
-const EXPLAIN_TOOL = {
+const EXPLAIN_TOOL: Anthropic.Tool = {
   name: "submit_explanation",
   description:
     "Submit a structured explanation for why a price anomaly occurred, citing ONLY the event_ids of candidate NEWS ARTICLES or the SENTIMENT SNAPSHOT actually provided to you. Price context has no event_id and cannot be cited. Never invent an event_id.",
@@ -55,6 +55,12 @@ const EXPLAIN_TOOL = {
     },
     required: ["claim", "human_summary", "cited_event_ids", "confidence"],
   },
+  // This schema is byte-identical across EVERY call this pipeline ever
+  // makes, regardless of ticker or anomaly - caching it benefits not
+  // just the retry loop but every single Claude call, not only
+  // large-tier anomalies. Cache reads run ~90% cheaper than fresh
+  // input (see DECISIONS.md pricing notes).
+  cache_control: { type: "ephemeral" },
 };
 
 interface CandidateContext {
@@ -97,7 +103,15 @@ empty cited_event_ids array rather than repeating a rejected citation.
 `;
 }
 
-function buildPrompt(ctx: CandidateContext): string {
+/**
+ * The stable part of the prompt - anomaly details, price context, news,
+ * sentiment. Identical across every retry attempt for a given anomaly
+ * (only the feedback/instructions suffix below changes between
+ * attempts), so this is the part marked cache_control in
+ * generateExplanation(). Split out specifically to enable prompt
+ * caching for the retry loop - see DECISIONS.md for the cost reasoning.
+ */
+function buildStableContext(ctx: CandidateContext): string {
   const { anomaly, recentTicks, candidateNews, sentimentSnapshots } = ctx;
 
   const tickSummary = recentTicks
@@ -169,8 +183,19 @@ aggregate crypto-wide mood across the whole market, not specific to
 ${anomaly.ticker} - if you cite a market_wide sentiment snapshot, frame
 your reasoning as a broad/systemic mood shift affecting the whole
 market, not as something specific to ${anomaly.ticker}:
-${sentimentSummary}
-${buildFeedbackSection(ctx.priorRejections)}
+${sentimentSummary}`;
+}
+
+/**
+ * The variable part of the prompt - retry feedback (empty on the first
+ * attempt) plus the closing instructions. NOT cached, since the
+ * feedback section differs on every retry attempt - only this
+ * (typically short) suffix gets sent as fresh, uncached input on a
+ * retry, while the much larger stable context above is served from
+ * cache.
+ */
+function buildVariableSuffix(priorRejections?: string[][]): string {
+  return `${buildFeedbackSection(priorRejections)}
 Using ONLY the event_ids from the candidate news articles or the
 sentiment snapshots listed above (never invent an id, never cite the
 price context above - it has no id), explain why this anomaly likely
@@ -184,12 +209,36 @@ export async function generateExplanation(
   ctx: CandidateContext,
   model = "claude-sonnet-5",
 ): Promise<ExplanationGenerated> {
+  const stableContext = buildStableContext(ctx);
+  const variableSuffix = buildVariableSuffix(ctx.priorRejections);
+
   const message = await client.messages.create({
     model,
     max_tokens: 1024,
     tools: [EXPLAIN_TOOL],
     tool_choice: { type: "tool", name: "submit_explanation" },
-    messages: [{ role: "user", content: buildPrompt(ctx) }],
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: stableContext,
+            // Cache breakpoint: this block (anomaly + price context +
+            // news + sentiment) is byte-identical across every retry
+            // attempt for this anomaly - only the block below changes.
+            // A "large" tier anomaly can make up to 4 calls through the
+            // retry loop; from the 2nd attempt onward, this block is
+            // served from cache at ~10% of fresh input cost.
+            cache_control: { type: "ephemeral" },
+          },
+          {
+            type: "text",
+            text: variableSuffix,
+          },
+        ],
+      },
+    ],
   });
 
   const toolUse = message.content.find(

@@ -18,7 +18,6 @@ hindsight; add a note below them instead if a decision was later revised.
 always-on tick stream with no natural "batch" boundary.
 
 **Options considered:**
-
 - Isolation Forest / One-Class SVM (unsupervised outlier detection)
 - LSTM Autoencoders (reconstruction-error based)
 - EWMA + MAD (exponentially weighted moving average / mean absolute
@@ -27,7 +26,6 @@ always-on tick stream with no natural "batch" boundary.
 **Decision:** EWMA/MAD as the permanent core detector.
 
 **Why:**
-
 - O(1) update per tick, no stored history window, no retraining -
   fits a continuous stream naturally where the ML options require a
   batch-trained model with periodic retraining and drift management.
@@ -95,7 +93,6 @@ different sensitivity thresholds. Naive approach: one detector
 instance per (user, ticker) pair.
 
 **Options considered:**
-
 1. One `AnomalyDetector` instance per subscriber per ticker
 2. One shared instance per ticker, run at the most sensitive threshold
    across all subscribers, then filter per-subscriber after detection
@@ -202,7 +199,7 @@ the "Open Verification Items" section at the bottom of this file.
 **Context:** Two related problems surfaced once subscriber-configurable
 sensitivity was in place: (1) a low sensitivity threshold means many
 more anomalies fire, each costing a Claude API call - cost scales with
-how sensitive the _most_ sensitive subscriber is, not with how
+how sensitive the *most* sensitive subscriber is, not with how
 interesting the anomaly actually is; (2) small anomalies often have no
 real "cause" at all (they're noise/thin liquidity), and forcing an
 explanation risks the agent inventing a plausible-sounding but false
@@ -210,7 +207,6 @@ link to unrelated news - exactly what the grounding verifier exists to
 catch, but better to not manufacture the problem in the first place.
 
 **Decision:** Two-part fix:
-
 1. **Magnitude tiering** - classify every anomaly by
    `max(price_z, volume_z)` into `small` / `medium` / `large` before
    deciding what to do with it:
@@ -241,7 +237,6 @@ volume of anomalies that get the expensive treatment is much smaller
 than the volume that fires in total.
 
 **Alternatives considered and rejected:**
-
 - Flat retry budget for every anomaly regardless of size - rejected,
   defeats the cost-control purpose entirely.
 - Suppressing small anomalies instead of reporting them - rejected,
@@ -261,7 +256,6 @@ feedback-aware prompt in `src/agent/explanationAgent.ts`).
 Reddit or news.
 
 **Options considered:**
-
 - Official X API
 - Third-party X data providers (Sorsa, GetXAPI, Netrows, etc.)
 
@@ -274,7 +268,7 @@ explicit strict-free-tier constraint (see ADR-007's design rationale,
 which applies here too). Third-party scrapers are cheaper but carry
 ToS/reliability risk and don't fit the "free, official-source" pattern
 used everywhere else in this project (Coinbase, Adanos, cryptocurrency.cv).
-X would also just be a second source of the _same signal category_
+X would also just be a second source of the *same signal category*
 (social sentiment) that Reddit already covers - unlike news vs.
 sentiment, which are genuinely different signal types.
 
@@ -291,7 +285,6 @@ failure isolation.
 
 **Decision:** Five services connected via Pub/Sub, each with a single
 responsibility:
-
 - `ingestion-svc` - Coinbase WS -> `PriceTick` events
 - `detector-svc` - ticks -> `PriceAnomalyDetected` (stateful, in-memory
   baseline per ticker - see note below)
@@ -331,7 +324,6 @@ file). The user later shared real screenshots of Adanos' actual API
 responses.
 
 **What was wrong:**
-
 - Assumed endpoint: `GET /v1/reddit-crypto/token?ticker=BTC` (ticker as
   a query parameter)
 - Real endpoint: `GET /reddit/stocks/v1/stock/{TICKER}` (ticker as a
@@ -465,7 +457,6 @@ of just logging "404", so a genuine "Adanos doesn't track this symbol"
 case is distinguishable in logs from other possible 404 causes.
 
 **New information surfaced, not yet acted on:**
-
 - **`GET /reddit/crypto/v1/market-sentiment`** returns an
   aggregate crypto-wide sentiment reading with a `drivers[]` array
   (top symbols driving overall crypto sentiment) - this maps directly
@@ -547,13 +538,12 @@ global-cache design above.
 **Status:** Implemented (`src/events/types.ts`,
 `src/sentiment/sentimentIngestion.ts` - new `getMarketSnapshot()`
 alongside the existing `getSnapshot()`, `src/agent/explanationAgent.ts`
-
 - `sentimentSnapshots` array replacing the old singular field,
-  `services/agent-svc/src/index.ts`, `services/grounding-svc/src/index.ts`
+`services/agent-svc/src/index.ts`, `services/grounding-svc/src/index.ts`
 - scope-aware confidence scoring, `src/eval/testLiveExternalApis.ts` -
-  opt-in second Adanos call via `FETCH_MARKET_SENTIMENT=1`). Not yet
-  exercised against a live Adanos response - same open verification
-  item as the rest of the sentiment integration.
+opt-in second Adanos call via `FETCH_MARKET_SENTIMENT=1`). Not yet
+exercised against a live Adanos response - same open verification
+item as the rest of the sentiment integration.
 
 ---
 
@@ -583,7 +573,6 @@ from the "unknown/neutral" defaults in confidenceScorer.ts) for a
 claim that explicitly has no causal content to be confident about.
 
 **Fix applied (both files, plus grounding-svc and the test script):**
-
 - `groundingVerifier.ts` / `groundingVerifierAsync.ts`: empty citations
   now return `structurally_grounded: true` (vacuously grounded -
   nothing to verify) specifically when `claim === "no_clear_cause"`;
@@ -635,7 +624,6 @@ dependencies.** This project now depends on THREE free external APIs
 go dark for reasons entirely outside this codebase's control (a
 maintainer's unpaid hosting bill, in this case). Options, not yet
 decided:
-
 1. Accept the risk - free-tier dependencies are part of the
    project's explicit cost-conscious design (ADR-007, ADR-009), and a
    graceful `no_clear_cause` fallback already exists for exactly this
@@ -659,6 +647,8 @@ codebase. Resiliency tradeoff logged, not yet decided.
 
 ---
 
+
+
 ## ADR-017: Swapped cryptocurrency.cv for Tiingo News API
 
 **Context:** ADR-016 confirmed cryptocurrency.cv's outage was a
@@ -671,7 +661,6 @@ for recovery.
 
 **Options considered** (researched candidates: CoinGecko Demo,
 CoinMarketCap Basic, Tiingo News API, NewsData.io):
-
 - CoinGecko/CoinMarketCap free tiers are strong for market/price data
   but aren't built as full-article news-content APIs - weaker fit for
   what `newsIngestion.ts` actually needs (headline + summary text to
@@ -699,15 +688,14 @@ processing news to generate this project's own derived explanations.
 2026-07-11 - not guessed from marketing copy or a screenshot, learned
 from the Adanos ADR-011/012 lesson to go straight to the authoritative
 source):
-
 - Endpoint: `GET https://api.tiingo.com/tiingo/news`
 - Auth: `Authorization: Token {TIINGO_API_KEY}` header (not keyless,
   unlike the old cryptocurrency.cv assumption)
 - Real fields: `id`, `title`, `url`, `description`, `publishedDate`,
   `crawlDate`, `source` (domain), `tickers[]`, `tags[]`
 - Same two-fetch pattern preserved: `?tickers={symbol}` (ticker-scoped)
-  - `?sortBy=crawlDate` with no ticker filter (latest/general, catches
-    market_wide articles a ticker-scoped query would miss)
+  + `?sortBy=crawlDate` with no ticker filter (latest/general, catches
+  market_wide articles a ticker-scoped query would miss)
 - **One real improvement over the old design**: Tiingo's own
   `tickers[]` array is a stronger ticker-specific signal than the
   lexicon-based `classifyNewsScope()` heuristic - if Tiingo itself
@@ -732,6 +720,8 @@ work before ADR-013 validated it live.
 
 ---
 
+
+
 ## ADR-018: Tiingo News confirmed paid-only - decided to upgrade to Power
 
 **Context:** ADR-017 swapped `newsIngestion.ts` to Tiingo. The first
@@ -751,7 +741,6 @@ that's gated.)
 **Decision point, not yet resolved:** this breaks the project's
 consistent "stay on free tier" design principle (ADR-007, ADR-009).
 Options:
-
 1. Pay Tiingo Power ($30/month) - best content quality (20M articles,
    3 months queryable history, proper ticker/FX/equity/crypto tagging)
    but the project's first paid dependency.
@@ -775,6 +764,8 @@ the `403` was purely the Starter plan's News restriction, not a bug.
 Once the Power plan is active, the exact same code should work as-is.
 
 ---
+
+
 
 ## ADR-019: Tiingo's unfiltered feed is too broad for "market_wide" - scoped to crypto bellwethers instead
 
@@ -826,6 +817,8 @@ unfiltered, mostly-irrelevant feed.
 
 ---
 
+
+
 ## ADR-020: Synthetic test price needed to be realistic per-ticker, not just "not zero"
 
 **Context:** ADR (price:0 fix, folded into the file header history)
@@ -865,6 +858,204 @@ but wasn't judged worth the extra API dependency for what's
 fundamentally a test/dev script, not production code.
 
 ---
+
+
+
+## ADR-021: First full end-to-end validation - explained claim, correctly grounded and cited (plus a mistagging fix)
+
+**Context:** ARB-USD live test (2026-07-11) - this is the first run
+across the entire testing session that produced an `"explained"`
+claim rather than `no_clear_cause`. Claude correctly identified and
+cited the single genuinely relevant article out of 10 fetched (the
+Robinhood Chain fee-revenue story) alongside real ARB-specific
+sentiment, ignoring 8 completely unrelated articles that happened to
+also come back tagged for this ticker. Structural grounding passed,
+composite confidence landed at 0.57 (reasonable - single ticker-
+specific news source plus coherent sentiment, not an overwhelming
+multi-source case).
+
+**This validates the full pipeline end-to-end for the first time**:
+real Tiingo news -> real Adanos sentiment -> Claude citing specific
+event_ids -> structural verification -> confidence scoring, all
+against live data rather than synthetic/mocked candidates.
+
+**Real finding from the same run: Tiingo ticker-tagging noise.**
+Several of the 10 fetched articles (English speakers watching World
+Cup broadcasts in Spanish, a Disney+ free-tier rumor, Netflix
+removing a series) were tagged by Tiingo's own `tickers[]` field as
+"arb" despite having zero textual connection to Arbitrum. The
+pipeline was NOT broken by this - Claude correctly ignored all of it
+and cited only the genuinely relevant article - but the underlying
+trust assumption (ADR-017: trust Tiingo's own tag outright when it
+matches) turned out to be too permissive for short/ambiguous symbols.
+
+**Fix:** `newsIngestion.ts` now requires BOTH signals to agree -
+Tiingo's tag is trusted as `ticker_specific` only when
+`classifyNewsScope()` (text-based) also doesn't classify the article
+as `unrelated`. Separately, `scopeClassifier.ts`'s text matching was
+upgraded from plain substring (`text.includes(alias)`) to word-
+boundary matching, since a short symbol like "arb" as a raw substring
+would itself false-positive inside unrelated words ("barbecue",
+"carburetor") - this matters more now that the classifier also serves
+as the corroboration check for Tiingo's tagging, not just a
+standalone fallback.
+
+**Why this is worth fixing even though the LLM already handled it
+correctly:** relying on Claude's judgment to always catch upstream
+data-quality noise is a weaker guarantee than filtering it out before
+it ever reaches the prompt - a future case (a mistagged article that
+happens to be topically plausible-sounding) could pass Claude's
+judgment where these obviously-irrelevant ones didn't. Filtering
+noise at ingestion is more robust than trusting the LLM to always
+notice it, per the same philosophy behind the grounding verifier
+itself (don't rely on model judgment where a deterministic check is
+possible).
+
+**Status:** Implemented (`src/news/newsIngestion.ts`,
+`src/news/scopeClassifier.ts`). Not yet re-tested live with this fix
+in place - next ARB-USD (or similar short-symbol ticker) run should
+show a cleaner candidate list with the unrelated articles filtered
+out entirely, without changing the outcome (which was already
+correct).
+
+---
+
+
+
+## ADR-022: The ADR-021 word-boundary fix had its own bug - ticker symbol vs. coin name mismatch
+
+**Context:** the user asked a sharp question right after ADR-021
+shipped: "the ticker symbol and the coin name can be different - won't
+requiring text corroboration now wrongly discard valid news that only
+uses the coin's full name?" This turned out to be a real bug in the
+fix just made, not just a hypothetical.
+
+**What went wrong:** ADR-021's word-boundary regex (`\bsymbol\b`)
+correctly stops "arb" from false-matching inside unrelated words like
+"barbecue" - but it ALSO stops "arb" from matching as a substring
+inside **"Arbitrum"** itself, since there's no word boundary between
+"arb" and "itrum" (both are word characters, so `\b` doesn't fire
+there). ADR-021's own reasoning claimed "real arbitrum articles will
+pass text classification too since arb is a substring of arbitrum" -
+that claim was simply wrong once word-boundary matching replaced plain
+substring matching. An article that only ever says "Arbitrum" and
+never abbreviates to "ARB" would have been wrongly discarded as
+`unrelated` by the ADR-021 fix, for exactly the ticker-vs-coin-name
+mismatch reason the user identified.
+
+**Fix:** expanded `fullNameMap` in `scopeClassifier.ts` from 3 entries
+(btc, eth, sol) to cover every ticker this project currently has a
+price estimate for: dot->polkadot, ada->cardano, avax->avalanche,
+link->chainlink, doge->dogecoin, matic->polygon, arb->arbitrum,
+xrp->ripple. Each ticker's aliases now include both the raw symbol and
+its full project/coin name, so word-boundary matching works correctly
+against either form.
+
+**Known residual limitation, stated honestly:** this is still a
+hand-maintained lookup table, not a general solution - any ticker NOT
+in this map, whose coin name doesn't happen to contain the symbol as a
+literal whole word, would still be vulnerable to the same bug for a
+new/uncommon ticker this project hasn't been tested against yet.
+Extending `fullNameMap` is a manual step required whenever a new
+ticker is added to this project, not something that happens
+automatically. A more complete solution (e.g. a maintained
+symbol-to-name lookup service, or leaning more on Tiingo's own tagging
+with a lighter-touch sanity check rather than requiring full text
+corroboration) is a reasonable future improvement if this keeps
+recurring, but the current fix directly addresses every ticker this
+project actually uses today.
+
+**Lesson for the log:** this is the second time in this project a fix
+for one live-testing finding (ADR-011->012, and now ADR-021->022)
+needed a second pass because the first fix's own reasoning had a gap.
+Worth double-checking a fix's own claimed correctness against a
+concrete counterexample (as the user did here) rather than accepting
+"this should also handle X" without testing it.
+
+**Status:** Implemented and confirmed live (`src/news/scopeClassifier.ts`).
+Re-running ARB-USD after the fix showed exactly the intended result:
+the same 8 irrelevant articles (World Cup, Disney+, Netflix) that
+previously came through as false-positive `ticker_specific` matches
+are now correctly filtered out entirely - the candidate pool went
+from 10 articles (1 relevant, 8 noise) down to exactly 1 (the correct
+Robinhood Chain article), with the same correct explanation and
+confidence (0.57) as before the fix. Noise removed, outcome
+unchanged - the fix worked as designed.
+
+---
+
+
+
+## ADR-023: Cost and correctness sweep - six changes, one review
+
+**Context:** with the core pipeline validated end-to-end (ADR-021),
+did a deliberate review of where money and correctness could both
+improve, now that there was real live-test evidence to reason from
+rather than speculation. Six changes, ranked by actual impact rather
+than implemented in arbitrary order:
+
+**1. Per-ticker anomaly cooldown** (`src/detector/anomalyCooldown.ts`)
+- the single highest-impact change. EWMA/MAD fires once per TICK past
+  threshold, not once per real-world event - a sustained pump could
+  fire the full news+sentiment+Claude pipeline dozens of times for one
+  causal event. Firestore-backed (multi-instance safe), 15-min window,
+  tier escalation always breaks through (a genuinely bigger move is
+  never suppressed).
+
+**2. Deterministic skip when nothing is fetchable** - with zero news
+AND zero sentiment, the only valid outcome is an honest
+`no_clear_cause` with empty citations (there's nothing else to cite) -
+synthesized directly, no Claude call. This was literally the DOT-USD
+test case from live testing.
+
+**3. News cache + URL dedup** (`src/news/newsCache.ts`) - fixed two
+problems: no caching at all (re-fetched every anomaly), and a real
+event-sourcing smell (the same article getting a fresh `event_id`
+every fetch, meaning five anomalies on one ticker could store the same
+article five times under five different ids). 20-min TTL, URL-hash
+index for cross-fetch dedup.
+
+**4. Explanation reuse cache** (`src/agent/explanationCache.ts`) -
+keyed on ticker + direction + tier + the exact sorted candidate
+event_id set. Complements #1 rather than duplicating it: cooldown
+handles "same event, many ticks"; this handles two genuinely separate
+anomalies (e.g. after a cooldown window lapsed) still explained by
+identical underlying data. Reused explanations get a fresh event_id
+and point at the new anomaly - never reuse the cached event's own id.
+
+**5. Prompt caching** (`src/agent/explanationAgent.ts`) - split the
+prompt into a stable, cacheable context block (anomaly + news +
+sentiment - identical across retry attempts) and a variable suffix
+(feedback + closing instructions). Also cached the tool schema itself,
+since it's identical across every call regardless of ticker. Benefits
+the retry loop most (up to 4 calls per large-tier anomaly), where
+attempts 2+ now pay roughly cache-read pricing instead of full input.
+
+**6. Model routing by tier** (`anomalyTiering.ts`) - medium tier
+(bulk of volume, one-shot, bounded citation task) routes to Haiku 4.5;
+large tier (retry loop, highest fabrication-risk stakes) keeps the
+more capable model. Same tier-to-behavior pattern already used for
+`maxRetries`, applied to model choice.
+
+**What was deliberately NOT done:** Redis/Memorystore - starts at
+$35+/month, more expensive than this project's most expensive existing
+dependency (Tiingo Power, $30/month), for a workload Firestore already
+handles fine at this scale (same reasoning as ADR-007's sentiment
+cache). An in-memory LRU cache was also rejected - Cloud Run can scale
+`agent-svc` to multiple instances, and a per-instance cache doesn't
+share state across them, the same problem ADR-007 already solved by
+going Firestore-backed instead.
+
+**Status:** All six implemented and typechecked clean, delivered as
+six separate git commits (one per change) for a clean, reviewable
+history. Not yet exercised against live production traffic - the
+cooldown and caching behaviors in particular would benefit from being
+watched under a real sustained anomaly to confirm the suppression
+logic behaves as designed, not just as unit-reasoned.
+
+---
+
+
 
 ## Deferred / not yet built (tracked, not forgotten)
 

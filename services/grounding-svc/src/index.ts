@@ -64,13 +64,6 @@ app.post("/pubsub/push", async (req, res) => {
     const verdict = await verifier.verifyStructural(explanation);
     await store.append(verdict);
 
-    if (!verdict.structurally_grounded) {
-      console.log(`[grounding-svc] REJECTED: ${verdict.failure_reason}`);
-      processedCount++;
-      res.status(200).send();
-      return;
-    }
-
     // An honest "no_clear_cause" now passes structural grounding (see
     // groundingVerifierAsync.ts / DECISIONS.md ADR-015) - correctly, since
     // there's nothing to fabricate when nothing was cited. But it should
@@ -82,6 +75,13 @@ app.post("/pubsub/push", async (req, res) => {
     // absence of one. Short-circuit here the same way agent-svc already
     // does for small-tier skips: report the anomaly honestly (per
     // ADR-006), composite_confidence: 0, without running the scoring math.
+    //
+    // NOTE this check is a SEPARATE, SEQUENTIAL check - NOT nested inside
+    // a structural-failure branch. A genuine structural failure (a claim
+    // that asserted a cause but cited something fabricated/non-causal)
+    // is handled below by computeConfidence()'s own structural gate,
+    // which forces the score to 0 automatically - no separate early
+    // return is needed for that case.
     if (explanation.claim === "no_clear_cause") {
       const anomaly = (await store.getById(explanation.anomaly_event_id)) as
         | PriceAnomalyDetected
@@ -116,7 +116,12 @@ app.post("/pubsub/push", async (req, res) => {
       return;
     }
 
-    // Structural check passed - now gather the confidence signals.
+    // Everything else - whether structurally grounded or not - flows
+    // through the full confidence pipeline. If verdict.structurally_grounded
+    // is false here (a genuine failure: the explanation asserted a cause
+    // but cited something fabricated or non-causal), computeConfidence's
+    // own structural gate forces composite_confidence to 0 automatically -
+    // see the "structural_gate: 0" breakdown key when that happens.
     const anomaly = (await store.getById(explanation.anomaly_event_id)) as
       | PriceAnomalyDetected
       | undefined;
