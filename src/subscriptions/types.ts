@@ -12,6 +12,7 @@
 export interface Subscription {
   subscription_id: string;
   user_id: string;
+  email: string; // where the actual alert gets delivered - see src/delivery/emailDelivery.ts
   ticker: string;
   price_z_threshold: number;
   volume_z_threshold: number;

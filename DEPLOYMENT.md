@@ -20,6 +20,7 @@ gcloud pubsub topics create alerts
 
 # Secrets (safer than plain env vars for anything beyond local testing)
 echo -n "$ANTHROPIC_API_KEY" | gcloud secrets create anthropic-api-key --data-file=-
+echo -n "$TIINGO_API_KEY" | gcloud secrets create tiingo-api-key --data-file=-   # REQUIRED - Power plan, see DECISIONS.md ADR-017/018
 echo -n "$GROQ_API_KEY" | gcloud secrets create groq-api-key --data-file=-       # optional
 echo -n "$ADANOS_API_KEY" | gcloud secrets create adanos-api-key --data-file=-   # optional
 

@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Market Anomaly Agent — Control Panel</title>
+<meta name="robots" content="noindex, nofollow" />
+<style>
+  :root {
+    --bg: #0b0e12;
+    --panel: #12161c;
+    --panel-border: #232a33;
+    --text: #e6e9ed;
+    --text-dim: #8b96a3;
+    --accent-on: #3ddc84;
+    --accent-off: #ff5c5c;
+    --accent-neutral: #4c8dff;
+    --mono: 'SF Mono', 'Consolas', 'Menlo', monospace;
+    --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    line-height: 1.5;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 32px 20px 80px; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .subtitle { color: var(--text-dim); font-size: 13px; margin: 0 0 32px; font-family: var(--mono); }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin-bottom: 20px;
+  }
+  .panel h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-dim); margin: 0 0 16px; font-weight: 600; }
+
+  /* Master switch - deliberately the loudest element on the page */
+  .master-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 20px; border-radius: 8px; margin-bottom: 8px;
+    border: 1px solid var(--panel-border);
+  }
+  .master-row.on { background: rgba(61,220,132,0.08); border-color: rgba(61,220,132,0.3); }
+  .master-row.off { background: rgba(255,92,92,0.08); border-color: rgba(255,92,92,0.3); }
+  .master-label { font-family: var(--mono); font-size: 15px; font-weight: 600; }
+  .status-pill { font-family: var(--mono); font-size: 12px; padding: 3px 10px; border-radius: 20px; font-weight: 600; }
+  .status-pill.on { background: var(--accent-on); color: #04140b; }
+  .status-pill.off { background: var(--accent-off); color: #250505; }
+
+  .flag-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--panel-border); }
+  .flag-row:last-child { border-bottom: none; }
+  .flag-name { font-family: var(--mono); font-size: 13px; }
+  .flag-desc { color: var(--text-dim); font-size: 12px; margin-top: 2px; }
+
+  .switch { position: relative; width: 42px; height: 24px; flex-shrink: 0; margin-left: 16px; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider { position: absolute; cursor: pointer; inset: 0; background: #3a4250; border-radius: 24px; transition: 0.15s; }
+  .slider::before { content: ""; position: absolute; height: 18px; width: 18px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: 0.15s; }
+  input:checked + .slider { background: var(--accent-on); }
+  input:checked + .slider::before { transform: translateX(18px); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--text-dim); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; padding: 8px 8px; border-bottom: 1px solid var(--panel-border); }
+  td { padding: 10px 8px; border-bottom: 1px solid var(--panel-border); font-family: var(--mono); }
+  tr:last-child td { border-bottom: none; }
+  .del-btn { background: none; border: 1px solid var(--panel-border); color: var(--accent-off); border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: 12px; }
+  .del-btn:hover { background: rgba(255,92,92,0.1); }
+
+  .add-form { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr auto; gap: 8px; margin-top: 16px; }
+  .add-form input {
+    background: var(--bg); border: 1px solid var(--panel-border); color: var(--text);
+    border-radius: 6px; padding: 8px 10px; font-family: var(--mono); font-size: 13px; width: 100%;
+  }
+  .add-form input:focus { outline: 2px solid var(--accent-neutral); outline-offset: -1px; }
+  .add-btn {
+    background: var(--accent-neutral); color: white; border: none; border-radius: 6px;
+    padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer;
+  }
+  .add-btn:hover { opacity: 0.85; }
+  .add-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  .hint { color: var(--text-dim); font-size: 12px; margin-top: 10px; }
+
+  /* Auth gate */
+  #auth-gate { max-width: 360px; margin: 120px auto; text-align: center; }
+  #auth-gate input {
+    display: block; width: 100%; margin: 10px 0; padding: 10px 12px;
+    background: var(--panel); border: 1px solid var(--panel-border); color: var(--text);
+    border-radius: 8px; font-size: 14px;
+  }
+  #auth-gate button {
+    width: 100%; padding: 10px; background: var(--accent-neutral); color: white;
+    border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; margin-top: 6px;
+  }
+  #auth-error { color: var(--accent-off); font-size: 13px; margin-top: 10px; min-height: 18px; }
+  #app { display: none; }
+  .signout { color: var(--text-dim); font-size: 12px; cursor: pointer; text-decoration: underline; }
+  .toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+    background: var(--panel); border: 1px solid var(--panel-border); color: var(--text);
+    padding: 10px 18px; border-radius: 8px; font-size: 13px; font-family: var(--mono);
+    opacity: 0; transition: opacity 0.2s; pointer-events: none;
+  }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<div id="auth-gate">
+  <h1>Control Panel</h1>
+  <p class="subtitle">sign in to manage flags &amp; subscribers</p>
+  <input id="email" type="email" placeholder="email" autocomplete="username" />
+  <input id="password" type="password" placeholder="password" autocomplete="current-password" />
+  <button id="signin-btn">Sign in</button>
+  <div id="auth-error"></div>
+</div>
+
+<div id="app">
+  <div class="wrap">
+    <h1>Market Anomaly Agent</h1>
+    <p class="subtitle">control panel &nbsp;·&nbsp; <span class="signout" id="signout-btn">sign out</span></p>
+
+    <div class="panel">
+      <h2>Kill switch</h2>
+      <div class="master-row" id="master-row">
+        <span class="master-label">pipeline_enabled</span>
+        <div style="display:flex; align-items:center; gap:14px;">
+          <span class="status-pill" id="master-pill">—</span>
+          <label class="switch">
+            <input type="checkbox" id="master-toggle" />
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
+      <p class="hint">Turning this OFF stops the entire pipeline immediately — no news, sentiment, or Claude calls for any anomaly, regardless of the flags below. Takes effect within ~15 seconds.</p>
+    </div>
+
+    <div class="panel">
+      <h2>Individual API flags</h2>
+      <div id="flag-rows"></div>
+      <p class="hint">These only matter while the master switch above is ON. Use these to pause one expensive call (e.g. Claude) without stopping everything.</p>
+    </div>
+
+    <div class="panel">
+      <h2>Subscribers</h2>
+      <table id="sub-table">
+        <thead>
+          <tr><th>Email</th><th>Ticker</th><th>Price Z</th><th>Vol Z</th><th>Debounce</th><th></th></tr>
+        </thead>
+        <tbody id="sub-rows"></tbody>
+      </table>
+      <div class="add-form">
+        <input id="new-email" type="email" placeholder="email" />
+        <input id="new-ticker" type="text" placeholder="BTC-USD" />
+        <input id="new-pricez" type="number" step="0.1" placeholder="price z (3.0)" />
+        <input id="new-volz" type="number" step="0.1" placeholder="vol z (2.0)" />
+        <button class="add-btn" id="add-sub-btn">Add</button>
+      </div>
+      <p class="hint">Debounce defaults to 5 minutes. Lower z-score thresholds mean MORE alerts (more API cost) — use real values (3.0 / 2.0 is the system default), not low ones for "testing."</p>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!-- Firebase JS SDK (modular, CDN, no build step) -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+  import {
+    getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut
+  } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
+  import {
+    getFirestore, doc, setDoc, collection, getDocs, deleteDoc, onSnapshot
+  } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
+
+  // ---- FILL THIS IN with your own Firebase project's web config ----
+  // Firebase Console -> Project Settings -> General -> Your apps -> SDK setup and config
+  const firebaseConfig = {
+    apiKey: "REPLACE_ME",
+    authDomain: "REPLACE_ME.firebaseapp.com",
+    projectId: "REPLACE_ME",
+    storageBucket: "REPLACE_ME.appspot.com",
+    messagingSenderId: "REPLACE_ME",
+    appId: "REPLACE_ME",
+  };
+  // --------------------------------------------------------------------
+
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db = getFirestore(app);
+
+  const FLAGS = [
+    { key: "claude_enabled", label: "claude_enabled", desc: "Gates the actual Claude API call" },
+    { key: "tiingo_enabled", label: "tiingo_enabled", desc: "Gates news fetch (Tiingo Power - the paid data source)" },
+    { key: "adanos_enabled", label: "adanos_enabled", desc: "Gates sentiment fetch (Adanos free tier)" },
+    { key: "groq_enabled", label: "groq_enabled", desc: "Gates the optional semantic verification call (Groq free tier)" },
+  ];
+
+  function showToast(msg) {
+    const t = document.getElementById("toast");
+    t.textContent = msg;
+    t.classList.add("show");
+    setTimeout(() => t.classList.remove("show"), 2200);
+  }
+
+  // ---- Auth ----
+  document.getElementById("signin-btn").addEventListener("click", async () => {
+    const email = document.getElementById("email").value.trim();
+    const password = document.getElementById("password").value;
+    const errEl = document.getElementById("auth-error");
+    errEl.textContent = "";
+    try {
+      await signInWithEmailAndPassword(auth, email, password);
+    } catch (err) {
+      errEl.textContent = "Sign-in failed — check email/password.";
+    }
+  });
+
+  document.getElementById("signout-btn").addEventListener("click", () => signOut(auth));
+
+  onAuthStateChanged(auth, (user) => {
+    document.getElementById("auth-gate").style.display = user ? "none" : "block";
+    document.getElementById("app").style.display = user ? "block" : "none";
+    if (user) {
+      initFlags();
+      initSubscribers();
+    }
+  });
+
+  // ---- Feature flags ----
+  const flagsDocRef = doc(db, "system_config", "feature_flags");
+
+  function renderFlagRows() {
+    const container = document.getElementById("flag-rows");
+    container.innerHTML = "";
+    FLAGS.forEach((f) => {
+      const row = document.createElement("div");
+      row.className = "flag-row";
+      row.innerHTML = `
+        <div>
+          <div class="flag-name">${f.label}</div>
+          <div class="flag-desc">${f.desc}</div>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="flag-${f.key}" />
+          <span class="slider"></span>
+        </label>
+      `;
+      container.appendChild(row);
+    });
+    FLAGS.forEach((f) => {
+      document.getElementById(`flag-${f.key}`).addEventListener("change", (e) => {
+        setDoc(flagsDocRef, { [f.key]: e.target.checked }, { merge: true })
+          .then(() => showToast(`${f.key} → ${e.target.checked ? "ON" : "OFF"}`))
+          .catch(() => showToast("Failed to save — check permissions"));
+      });
+    });
+  }
+
+  function applyFlagState(data) {
+    const master = data?.pipeline_enabled !== false;
+    document.getElementById("master-toggle").checked = master;
+    document.getElementById("master-row").className = "master-row " + (master ? "on" : "off");
+    document.getElementById("master-pill").textContent = master ? "RUNNING" : "STOPPED";
+    document.getElementById("master-pill").className = "status-pill " + (master ? "on" : "off");
+
+    FLAGS.forEach((f) => {
+      const el = document.getElementById(`flag-${f.key}`);
+      if (el) el.checked = data?.[f.key] !== false;
+    });
+  }
+
+  function initFlags() {
+    renderFlagRows();
+
+    document.getElementById("master-toggle").addEventListener("change", (e) => {
+      setDoc(flagsDocRef, { pipeline_enabled: e.target.checked }, { merge: true })
+        .then(() => showToast(e.target.checked ? "Pipeline ENABLED" : "Pipeline STOPPED"))
+        .catch(() => showToast("Failed to save — check permissions"));
+    });
+
+    // Live sync - reflects changes made elsewhere (CLI, Firestore console) too
+    onSnapshot(flagsDocRef, (snap) => applyFlagState(snap.exists() ? snap.data() : {}));
+  }
+
+  // ---- Subscribers ----
+  const subsCol = collection(db, "subscriptions");
+
+  function renderSubRow(id, sub) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${sub.email ?? ""}</td>
+      <td>${sub.ticker ?? ""}</td>
+      <td>${sub.price_z_threshold ?? ""}</td>
+      <td>${sub.volume_z_threshold ?? ""}</td>
+      <td>${sub.debounce_ms ? Math.round(sub.debounce_ms / 60000) + "m" : ""}</td>
+      <td><button class="del-btn" data-id="${id}">Remove</button></td>
+    `;
+    tr.querySelector(".del-btn").addEventListener("click", async () => {
+      await deleteDoc(doc(db, "subscriptions", id));
+      showToast("Subscriber removed");
+    });
+    return tr;
+  }
+
+  async function refreshSubscribers() {
+    const rowsEl = document.getElementById("sub-rows");
+    rowsEl.innerHTML = "";
+    const snap = await getDocs(subsCol);
+    snap.forEach((d) => rowsEl.appendChild(renderSubRow(d.id, d.data())));
+  }
+
+  function initSubscribers() {
+    refreshSubscribers();
+
+    document.getElementById("add-sub-btn").addEventListener("click", async () => {
+      const email = document.getElementById("new-email").value.trim();
+      const ticker = document.getElementById("new-ticker").value.trim().toUpperCase();
+      const priceZ = parseFloat(document.getElementById("new-pricez").value) || 3.0;
+      const volZ = parseFloat(document.getElementById("new-volz").value) || 2.0;
+
+      if (!email || !ticker) {
+        showToast("Email and ticker are required");
+        return;
+      }
+
+      // Pre-generate the doc ref (via doc(collection)) rather than
+      // addDoc, so subscription_id can be set to match the doc's own
+      // id - fanout-svc's per-subscriber debounce tracking keys off
+      // this field, same pattern SubscriptionsStore.create() already
+      // uses on the backend.
+      const newRef = doc(subsCol);
+      await setDoc(newRef, {
+        subscription_id: newRef.id,
+        user_id: email,
+        email,
+        ticker,
+        price_z_threshold: priceZ,
+        volume_z_threshold: volZ,
+        debounce_ms: 5 * 60 * 1000,
+        created_at: Date.now(),
+      });
+
+      document.getElementById("new-email").value = "";
+      document.getElementById("new-ticker").value = "";
+      document.getElementById("new-pricez").value = "";
+      document.getElementById("new-volz").value = "";
+      showToast("Subscriber added");
+      refreshSubscribers();
+    });
+  }
+</script>
+</body>
+</html>

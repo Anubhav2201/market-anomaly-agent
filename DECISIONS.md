@@ -1057,6 +1057,236 @@ logic behaves as designed, not just as unit-reasoned.
 
 
 
+## ADR-024: Latency improvements - parallel fetch + two-stage fan-out
+
+**Context:** the pipeline is already event-driven at the service level
+(Pub/Sub decouples ingestion-svc/detector-svc/agent-svc/grounding-svc/
+fanout-svc, and different anomalies process concurrently). But for any
+SINGLE anomaly, nothing reached the subscriber until the entire chain
+finished - fetch news, fetch sentiment, call Claude (up to 3 sequential
+retry attempts for a large-tier anomaly), grounding, confidence, THEN
+the alert publishes. A large-tier anomaly could take 10+ seconds
+before the subscriber saw anything at all.
+
+**Two changes:**
+
+1. **Parallelized news + sentiment fetch** in agent-svc - these are two
+   fully independent API calls (Tiingo, Adanos) with no data dependency
+   between them, previously awaited one after another for no reason.
+   Quick, free latency win on every single anomaly.
+
+2. **Two-stage fan-out** - the real fix for "Claude takes its own sweet
+   time." `AlertReady` gained a `stage: "investigating" | "final"`
+   field. agent-svc now publishes a fast, raw "investigating" alert the
+   INSTANT an anomaly is tiered - before any news/sentiment fetch or
+   Claude call - carrying the anomaly's real z-scores but no
+   explanation yet. The enriched "final" alert (from grounding-svc, or
+   agent-svc's own zero-candidate/small-tier paths) follows later,
+   sharing the same `anomaly_event_id`. Note this does NOT make the
+   retry loop itself faster - Plan->Act->Observe->Decide is inherently
+   sequential by design (attempt 2's prompt depends on attempt 1's
+   specific rejection reason, can't be parallelized without changing
+   what the retry loop fundamentally is). What it does is make the
+   *wait* invisible: subscribers see something immediately instead of
+   silence for however long the real explanation takes.
+
+**fanout-svc changes required by the new stage field:**
+- The existing `!alert.structurally_grounded` gate would have wrongly
+  skipped fan-out for EVERY "investigating" alert (always ungrounded by
+  construction, since nothing has been grounded yet) - scoped that gate
+  to `stage === "final"` only.
+- Per-subscriber debounce now tracks `anomaly_event_id` alongside
+  timestamp, not just timestamp. Without this, a "final" alert
+  following up on an "investigating" alert for the SAME anomaly (often
+  arriving within seconds) could get silently debounce-suppressed -
+  debounce is meant to space out genuinely DIFFERENT anomalies, not
+  block the natural two-stage delivery of one.
+
+**Tradeoff accepted:** subscribers now receive TWO notifications per
+anomaly instead of one (a real product/UX decision, not just a backend
+optimization) - a fast "looking into it" followed by the real
+explanation. Considered having fanout-svc silently swallow the
+"investigating" stage (log-only, no delivery) and only deliver on
+"final" - rejected, since that would defeat the actual goal (making
+the wait visible to be filled with SOMETHING) and reduces to the
+old single-alert behavior with extra plumbing for no benefit.
+
+**Status:** Implemented (`src/events/types.ts`,
+`services/agent-svc/src/index.ts`, `services/grounding-svc/src/index.ts`,
+`services/fanout-svc/src/index.ts`), typechecked clean. Not yet
+exercised against live Pub/Sub traffic - would be worth watching a real
+large-tier anomaly end-to-end to confirm both alerts actually arrive
+in the right order and the debounce bypass behaves as designed.
+
+---
+
+
+
+## ADR-025: Firestore-backed feature flags - instant kill switch for paid API calls
+
+**Context:** with real Cloud Run deployment approaching, needed a way
+to stop every paid API call this system makes (Claude, Tiingo, Adanos,
+Groq) instantly, without a redeploy - the whole point of a kill switch
+is that it works fast, at the moment you actually need it, not "works
+after a 60-second gcloud deploy."
+
+**Decision:** Firestore-backed flags (`system_config/feature_flags`
+doc), not environment variables. An env var requires
+`gcloud run services update --set-env-vars` (real time, requires a
+terminal session open) to change; a Firestore doc can be flipped from
+the console UI, the gcloud CLI, or a phone browser - and the new
+`toggleFlag.ts` script makes it a one-line command from a terminal:
+`npx tsx src/scripts/toggleFlag.ts pipeline_enabled off`.
+
+**Five flags, each independently toggleable:**
+- `pipeline_enabled` - MASTER switch, checked FIRST in agent-svc,
+  before even the cooldown check. If off, the pipeline does nothing at
+  all for an anomaly beyond the one Firestore read to check the flag.
+- `claude_enabled` - gates the Claude call specifically.
+- `tiingo_enabled` / `adanos_enabled` - gate news/sentiment fetch
+  individually, degrading exactly like a missing API key already does
+  (empty array / null snapshots, not a thrown error).
+- `groq_enabled` - gates the optional semantic check.
+
+**Fail-open by design:** a missing doc, missing field, or unreachable
+Firestore all default to enabled. This is a safety feature layered ON
+TOP of normal operation - its absence on first deploy shouldn't
+silently break the pipeline, and a transient Firestore hiccup
+shouldn't accidentally look like a deliberate stop.
+
+**A real design wrinkle this surfaced:** disabling Claude
+(`claude_enabled: false`) still needs to produce SOMETHING - an
+anomaly can't just vanish. Publishes a distinct `claude_disabled`
+explanation rather than reusing `no_clear_cause`, since they mean
+genuinely different things: `no_clear_cause` is "we looked and found
+nothing," `claude_disabled` is "we deliberately chose not to look" -
+conflating them would misrepresent real candidate news/sentiment that
+might exist but was never examined. This required extending the
+ADR-015 vacuous-grounding fix (`groundingVerifier.ts`/
+`groundingVerifierAsync.ts`) to also treat `claude_disabled` as a
+legitimate empty-citation claim, not a structural failure - without
+this, a paused explanation would have incorrectly failed grounding as
+if it were a fabricated citation.
+
+**Status:** Implemented (`src/config/featureFlags.ts`,
+`src/scripts/toggleFlag.ts`, wired into `agent-svc` and
+`grounding-svc`), typechecked clean. Not yet exercised against a real
+deployed Cloud Run environment - worth confirming the ~15s cache TTL
+actually behaves as expected under real multi-instance traffic before
+relying on it as the emergency stop it's meant to be.
+
+---
+
+
+
+## ADR-026: Real email delivery via Gmail SMTP - stub replaced
+
+**Context:** `fanout-svc` was a stub - it logged who WOULD receive an
+alert rather than actually sending anything. Needed real delivery to
+actually test the system end-to-end, starting with just the user's own
+email as the sole test subscriber.
+
+**Options considered:** SendGrid (100/day free tier historically),
+Resend (3,000/month free tier, developer-friendly API), Gmail SMTP via
+Nodemailer (an existing Gmail account + App Password).
+
+**Decision:** Gmail SMTP via Nodemailer.
+
+**Why:** zero new third-party signup - every other integration in this
+project (Tiingo, Adanos, Groq) required creating a new account and
+managing a new API key. An existing Gmail account already has
+everything needed via an App Password
+(myaccount.google.com -> Security -> 2-Step Verification -> App
+Passwords), genuinely free, and Gmail's own sending limit (~500/day
+for a personal account) is far beyond what a solo-testing subscriber
+list needs.
+
+**Explicit scale limitation, stated up front:** this is NOT the right
+choice once this has real subscribers beyond one person testing it.
+Sending transactional mail from a personal Gmail account carries real
+deliverability/spam risk at volume, and Gmail's SMTP relay isn't
+designed for that use case. A dedicated transactional provider
+(SendGrid, Resend, SES) is the correct move before onboarding real
+users - flagged here explicitly so it isn't quietly forgotten later.
+
+**Implementation:**
+- `src/delivery/emailDelivery.ts` - generic SMTP config (not
+  Gmail-specific env var names), so swapping providers later is a
+  config change, not a code change. Degrades to logging (doesn't
+  throw) if `SMTP_USER`/`SMTP_PASS` are unset - same graceful-
+  degradation philosophy as every other optional external dependency.
+- `Subscription` gained an `email` field (previously only had an
+  opaque `user_id` string with no way to actually reach anyone).
+- `fanout-svc` sends real emails for BOTH alert stages
+  (investigating/final), concurrently per-recipient (one slow/failed
+  send shouldn't block another), and still logs would-be recipients
+  when delivery isn't configured or fails - never silently invisible
+  either way.
+- New `src/scripts/createSubscription.ts` - quick CLI to seed a test
+  subscription with your own email:
+  `npx tsx src/scripts/createSubscription.ts you@example.com BTC-USD`
+
+**Status:** Implemented, typechecked clean. Not yet tested against a
+real sent email - next step is seeding one subscription and confirming
+an actual anomaly triggers actual delivery.
+
+---
+
+
+
+## ADR-027: Static control-panel dashboard, direct-to-Firestore, no backend
+
+**Context:** needed a way to manage feature flags (ADR-025) and the
+subscriber list without a terminal/CLI session open at the moment it's
+needed - a real control panel, not just `toggleFlag.ts`. Also
+corrected course on an earlier suggestion: recommending a `1.0`
+threshold "for easy testing" directly contradicted the entire
+cooldown/tiering/caching cost-control effort (ADR-008, ADR-023) - a
+low threshold means MORE real anomalies cross it, meaning more real
+API cost, which is specifically dangerous while unattended. The
+dashboard's subscriber form defaults to and explicitly warns against
+this.
+
+**Architecture decision: static page + direct Firestore access, no
+separate backend service.** The dashboard doesn't call any Cloud Run
+service - it reads/writes `system_config/feature_flags` and
+`subscriptions` directly via the Firebase client SDK from the browser.
+Considered a small Express backend (another Cloud Run service) to
+proxy these operations - rejected as unnecessary complexity: Firebase
+client SDK + Firestore security rules is exactly the intended pattern
+for this kind of authenticated admin tool, and skips standing up,
+deploying, and paying for (even at $0 marginal cost) a sixth service.
+
+**Hosting: Firebase Hosting, genuinely free at this scale** (10 GB
+storage / 360 MB/day transfer free tier - a one-person admin page
+checked occasionally is nowhere close to those limits).
+
+**Security is entirely enforced by Firestore rules** (`firestore.rules`
+at repo root), not by the page itself - a static HTML page's source is
+never actually private, so hiding the Firebase config or the toggle
+logic client-side would provide zero real security. Rules require
+`request.auth.token.email` to match a specific configured admin email
+for any read/write to `system_config` or `subscriptions`, and
+explicitly deny all client access to every other collection (the event
+store, caches, cooldown tracker) - the dashboard should only ever be
+able to touch what it's meant to manage, nothing else.
+
+**No build step, no framework** - a single self-contained HTML file
+using the Firebase JS SDK loaded from CDN. Deliberately minimal for a
+tool used by one person: React/a bundler would add real complexity
+(build pipeline, deploy step, dependency updates) for a UI with two
+sections and no reason to scale beyond that.
+
+**Status:** Implemented (`dashboard/index.html`, `firestore.rules`,
+`firebase.json`, `dashboard/README.md` with full setup steps).
+Requires manual one-time setup before use (enable Firebase Auth,
+configure the admin email in the rules, fill in the Firebase web
+config) - not yet deployed or tested against a live Firebase project.
+
+---
+
+
+
 ## Deferred / not yet built (tracked, not forgotten)
 
 - **v2 backtesting batch layer** - replay EWMA/MAD against historical

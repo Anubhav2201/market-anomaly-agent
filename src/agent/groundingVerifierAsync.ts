@@ -32,8 +32,13 @@ export class AsyncGroundingVerifier {
     if (explanation.cited_event_ids.length === 0) {
       // Same fix as groundingVerifier.ts (sync version) - see the comment
       // there and DECISIONS.md ADR-015. An honest no_clear_cause is
-      // vacuously grounded, not a structural failure.
-      if (explanation.claim === "no_clear_cause") {
+      // vacuously grounded, not a structural failure. Also covers
+      // claude_disabled (the feature-flag pause claim, DECISIONS.md
+      // ADR-025) - a deliberate "we chose not to look" is a different
+      // reason for empty citations than "we looked and found nothing,"
+      // but BOTH are legitimate, non-fabricated empty-citation claims,
+      // unlike an actual failed citation attempt.
+      if (explanation.claim === "no_clear_cause" || explanation.claim === "claude_disabled") {
         return {
           type: "GroundingVerified",
           event_id: uuidv4(),

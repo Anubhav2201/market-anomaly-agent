@@ -31,11 +31,13 @@ import {
   SentimentSnapshotIngested,
 } from "../../../src/events/types";
 import { publishEvent, parsePushMessage } from "../../../shared/pubsub";
+import { FeatureFlags } from "../../../src/config/featureFlags";
 
 const ALERTS_TOPIC = "alerts";
 
 const store = new FirestoreEventStore();
 const verifier = new AsyncGroundingVerifier(store);
+const featureFlags = new FeatureFlags();
 // NOTE: news volume baseline resets on cold start/redeploy since it's
 // in-memory - acceptable for now (it re-warms after a few anomalies),
 // but worth persisting to Firestore in a later pass if this matters.
@@ -82,7 +84,7 @@ app.post("/pubsub/push", async (req, res) => {
     // is handled below by computeConfidence()'s own structural gate,
     // which forces the score to 0 automatically - no separate early
     // return is needed for that case.
-    if (explanation.claim === "no_clear_cause") {
+    if (explanation.claim === "no_clear_cause" || explanation.claim === "claude_disabled") {
       const anomaly = (await store.getById(explanation.anomaly_event_id)) as
         | PriceAnomalyDetected
         | undefined;
@@ -105,7 +107,7 @@ app.post("/pubsub/push", async (req, res) => {
         await store.append(alert);
         await publishEvent(ALERTS_TOPIC, alert);
         console.log(
-          `[grounding-svc] VERIFIED (no_clear_cause, reported honestly, no confidence scoring): ${explanation.ticker}`,
+          `[grounding-svc] VERIFIED (${explanation.claim}, reported honestly, no confidence scoring): ${explanation.ticker}`,
         );
       } else {
         console.warn(
@@ -213,8 +215,14 @@ app.post("/pubsub/push", async (req, res) => {
           `Reddit sentiment (${s.scope}): score=${s.sentiment_score.toFixed(2)} (-1 bearish to +1 bullish), trend=${s.trend}, buzz=${s.buzz_score}/100`,
       ),
     ];
+    // groq_enabled gates this the same way a missing GROQ_API_KEY
+    // already does - semanticSupport stays null, which
+    // confidenceScorer.ts already treats as "unknown, neutral credit,"
+    // not a failure. This is the cheapest of the four gated calls
+    // (Groq's own free tier), but still worth being able to pause.
+    const groqEnabled = await featureFlags.isEnabled("groq_enabled");
     const semanticSupport =
-      semanticCheckContent.length > 0
+      groqEnabled && semanticCheckContent.length > 0
         ? await verifyClaimSupportedByContent(
             explanation.claim,
             semanticCheckContent,

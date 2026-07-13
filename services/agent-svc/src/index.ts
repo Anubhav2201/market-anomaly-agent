@@ -16,6 +16,7 @@ import express from "express";
 import { NewsCache } from "../../../src/news/newsCache";
 import { generateExplanation } from "../../../src/agent/explanationAgent";
 import { ExplanationCache } from "../../../src/agent/explanationCache";
+import { FeatureFlags } from "../../../src/config/featureFlags";
 import { FirestoreEventStore } from "../../../src/events/firestoreStore";
 import { AsyncGroundingVerifier } from "../../../src/agent/groundingVerifierAsync";
 import {
@@ -41,6 +42,7 @@ const groundingVerifier = new AsyncGroundingVerifier(store);
 const sentimentIngestion = new SentimentIngestion(store);
 const newsCache = new NewsCache(store);
 const explanationCache = new ExplanationCache(store);
+const featureFlags = new FeatureFlags();
 const cooldownTracker = new AnomalyCooldownTracker();
 const app = express();
 app.use(express.json());
@@ -195,6 +197,21 @@ app.post("/pubsub/push", async (req, res) => {
   }
 
   try {
+    // MASTER KILL SWITCH - checked before ANYTHING else, including
+    // parsing the tier or touching the cooldown tracker. If this is
+    // false, the pipeline does nothing at all for this anomaly beyond
+    // the one Firestore read to check the flag itself. Flip this
+    // instantly (Firestore console, gcloud CLI, or a tiny script - no
+    // redeploy) to stop every paid API call this service makes -
+    // Claude, Tiingo, Adanos - in one move. See DECISIONS.md for how
+    // to toggle it.
+    const pipelineEnabled = await featureFlags.isEnabled("pipeline_enabled");
+    if (!pipelineEnabled) {
+      console.log(`[agent-svc] PAUSED (pipeline_enabled=false): ${anomaly.ticker} - kill switch is on, doing nothing`);
+      res.status(200).send();
+      return;
+    }
+
     console.log(
       `[agent-svc] processing anomaly: ${anomaly.ticker} priceZ=${anomaly.price_z_score.toFixed(2)}`,
     );
@@ -263,7 +280,7 @@ app.post("/pubsub/push", async (req, res) => {
       explanation_event_id: "", // no explanation yet - this IS the point
       claim: "investigating",
       human_summary: `${anomaly.ticker} moved (price_z=${anomaly.price_z_score.toFixed(
-        2,
+        2
       )}, volume_z=${anomaly.volume_z_score.toFixed(2)}) - looking into the cause now.`,
       structurally_grounded: false, // nothing to ground yet - meaningless at this stage
       composite_confidence: 0,
@@ -274,7 +291,7 @@ app.post("/pubsub/push", async (req, res) => {
     await store.append(investigatingAlert);
     await publishEvent(ALERTS_TOPIC, investigatingAlert);
     console.log(
-      `[agent-svc] published INVESTIGATING alert for ${anomaly.ticker} (tier=${tier}) - enrichment in progress`,
+      `[agent-svc] published INVESTIGATING alert for ${anomaly.ticker} (tier=${tier}) - enrichment in progress`
     );
 
     // News and sentiment are fully independent fetches (different APIs,
@@ -282,12 +299,41 @@ app.post("/pubsub/push", async (req, res) => {
     // of sequentially. Shaves a real chunk of latency off every single
     // anomaly, since this was previously two separate awaited round
     // trips stacked one after another for no reason.
-    const [allNews, sentimentSnapshots] = await Promise.all([
-      newsCache.getRecentNews(anomaly.ticker, 10),
-      Promise.all([
+    //
+    // Each source is also independently gated by its own feature flag -
+    // if tiingo_enabled/adanos_enabled is false, treat it exactly like
+    // a missing API key (empty array / null snapshots) rather than
+    // throwing - same graceful-degradation path that already exists
+    // for a genuinely unset TIINGO_API_KEY/ADANOS_API_KEY.
+    const [tiingoEnabled, adanosEnabled] = await Promise.all([
+      featureFlags.isEnabled("tiingo_enabled"),
+      featureFlags.isEnabled("adanos_enabled"),
+    ]);
+
+    async function fetchNewsIfEnabled(): Promise<NewsArticleIngested[]> {
+      if (!tiingoEnabled) {
+        console.log("[agent-svc] news fetch skipped (tiingo_enabled=false)");
+        return [];
+      }
+      return newsCache.getRecentNews(anomaly.ticker, 10);
+    }
+
+    async function fetchSentimentIfEnabled(): Promise<
+      Awaited<ReturnType<typeof sentimentIngestion.getSnapshot>>[]
+    > {
+      if (!adanosEnabled) {
+        console.log("[agent-svc] sentiment fetch skipped (adanos_enabled=false)");
+        return [null, null];
+      }
+      return Promise.all([
         sentimentIngestion.getSnapshot(anomaly.ticker),
         sentimentIngestion.getMarketSnapshot(),
-      ]),
+      ]);
+    }
+
+    const [allNews, sentimentSnapshots] = await Promise.all([
+      fetchNewsIfEnabled(),
+      fetchSentimentIfEnabled(),
     ]);
     const candidateNews: NewsArticleIngested[] = allNews.filter(
       (n) => n.timestamp <= anomaly.timestamp,
@@ -357,6 +403,42 @@ app.post("/pubsub/push", async (req, res) => {
       processedCount++;
       console.log(
         `[agent-svc] REUSED (explanation cache): ${anomaly.ticker} tier=${tier} - identical candidate set, no Claude call made`,
+      );
+      res.status(200).send();
+      return;
+    }
+
+    // Last checkpoint before actually spending on Claude - claude_enabled
+    // gates the one call in this whole pipeline most directly
+    // responsible for cost. If disabled, publish a distinct
+    // "claude_disabled" explanation rather than a no_clear_cause -
+    // these mean genuinely different things (no_clear_cause = "we
+    // looked and found nothing"; claude_disabled = "we deliberately
+    // chose not to look"), and conflating them would misrepresent real
+    // candidate news/sentiment that might exist but was never examined.
+    const claudeEnabled = await featureFlags.isEnabled("claude_enabled");
+    if (!claudeEnabled) {
+      const pausedExplanation: ExplanationGenerated = {
+        type: "ExplanationGenerated",
+        event_id: uuidv4(),
+        ticker: anomaly.ticker,
+        timestamp: Date.now(),
+        anomaly_event_id: anomaly.event_id,
+        claim: "claude_disabled",
+        human_summary: `${anomaly.ticker} moved (price_z=${anomaly.price_z_score.toFixed(
+          2,
+        )}, volume_z=${anomaly.volume_z_score.toFixed(
+          2,
+        )}) - explanation generation is currently paused (claude_enabled=false), not attempted.`,
+        cited_event_ids: [],
+        confidence: 0,
+        candidate_news_count: candidateNews.length,
+      };
+      await store.append(pausedExplanation);
+      await publishEvent(EXPLANATIONS_TOPIC, pausedExplanation);
+      await cooldownTracker.recordProcessed(anomaly.ticker, tier);
+      console.log(
+        `[agent-svc] PAUSED (claude_enabled=false): ${anomaly.ticker} tier=${tier} - explanation not attempted`,
       );
       res.status(200).send();
       return;

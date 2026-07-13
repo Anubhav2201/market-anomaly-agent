@@ -38,7 +38,12 @@ export class GroundingVerifier {
       // here - vacuously grounded, not failed. Only a claim that ASSERTS
       // a specific cause with zero citations is a real structural
       // violation (the agent made a claim it can't back up).
-      if (explanation.claim === "no_clear_cause") {
+      // Also covers claude_disabled (the feature-flag pause claim,
+      // DECISIONS.md ADR-025) - a deliberate "we chose not to look" is
+      // a different reason for empty citations than "we looked and
+      // found nothing," but both are legitimate, non-fabricated
+      // empty-citation claims.
+      if (explanation.claim === "no_clear_cause" || explanation.claim === "claude_disabled") {
         return {
           type: "GroundingVerified",
           event_id: uuidv4(),

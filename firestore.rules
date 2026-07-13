@@ -1,0 +1,40 @@
+rules_version = '2';
+
+// SECURITY MODEL: this dashboard writes directly to Firestore from the
+// browser (no backend server for the dashboard itself - see
+// dashboard/README.md for why). That means Firestore's own security
+// rules are the ONLY thing standing between "only I can toggle feature
+// flags / manage subscribers" and "anyone with the page URL can."
+//
+// ADMIN_EMAIL below MUST be replaced with your actual email before
+// deploying - as written, this denies everyone (safe default, not
+// accidentally wide open) until you configure it.
+//
+// Deploy with: firebase deploy --only firestore:rules
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAdmin() {
+      return request.auth != null
+        && request.auth.token.email == "REPLACE_WITH_YOUR_EMAIL@example.com";
+    }
+
+    // Dashboard-managed collections - admin read/write only.
+    match /system_config/{docId} {
+      allow read, write: if isAdmin();
+    }
+    match /subscriptions/{docId} {
+      allow read, write: if isAdmin();
+    }
+
+    // Everything else (event store collections, caches, cooldown
+    // tracker, etc.) - backend services only, via their service
+    // account, which bypasses these client-facing rules entirely.
+    // Explicitly deny direct client access to avoid ever accidentally
+    // exposing the event log or caches to the browser.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

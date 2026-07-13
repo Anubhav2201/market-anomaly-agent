@@ -18,10 +18,11 @@
  * immediately instead of waiting out however long the retry loop takes
  * for a large-tier anomaly (can be 10+ seconds).
  *
- * DELIVERY IS STUBBED: this logs who WOULD receive the alert rather
- * than actually sending email/push/SMS - wiring a real delivery channel
- * (e.g. SendGrid, FCM) is a clean next step that plugs in right here
- * without touching anything upstream.
+ * REAL EMAIL DELIVERY: sends via src/delivery/emailDelivery.ts (SMTP,
+ * defaults to Gmail App Password - zero new signup, see that file for
+ * the full reasoning and its explicit scale limitation). Degrades to
+ * logging if SMTP isn't configured, same graceful-degradation pattern
+ * as every other optional external dependency in this project.
  *
  * Also enforces PER-SUBSCRIBER debounce (separate from detector-svc's
  * ticker-level debounce) - a subscriber with a longer debounce window
@@ -34,10 +35,12 @@
  */
 import express from "express";
 import { SubscriptionsStore } from "../../../src/subscriptions/subscriptionsStore";
+import { EmailDelivery } from "../../../src/delivery/emailDelivery";
 import { AlertReady } from "../../../src/events/types";
 import { parsePushMessage } from "../../../shared/pubsub";
 
 const subscriptionsStore = new SubscriptionsStore();
+const emailDelivery = new EmailDelivery();
 
 interface DeliveryRecord {
   timestamp: number;
@@ -89,7 +92,7 @@ app.post("/pubsub/push", async (req, res) => {
       return;
     }
 
-    const recipients: string[] = [];
+    const recipients: { email: string; subscriptionId: string }[] = [];
     for (const sub of subscribers) {
       const meetsThreshold =
         alert.price_z_score >= sub.price_z_threshold &&
@@ -111,17 +114,43 @@ app.post("/pubsub/push", async (req, res) => {
         timestamp: alert.timestamp,
         anomalyEventId: alert.anomaly_event_id,
       });
-      recipients.push(sub.user_id);
+      recipients.push({ email: sub.email, subscriptionId: sub.subscription_id });
     }
 
     if (recipients.length > 0) {
-      deliveredCount += recipients.length;
-      // STUB: replace with real delivery (email/push/SMS) here.
       const stageLabel = alert.stage === "investigating" ? "INVESTIGATING" : "FINAL";
-      console.log(
-        `[fanout-svc] DELIVER (${stageLabel}) to ${recipients.length} subscriber(s) for ${alert.ticker}: ` +
-          `"${alert.human_summary}" (confidence=${alert.composite_confidence.toFixed(2)}) -> users: ${recipients.join(", ")}`
+      const subject = `[${stageLabel}] ${alert.ticker} anomaly - ${alert.claim}`;
+      const body =
+        `${alert.human_summary}\n\n` +
+        `Ticker: ${alert.ticker}\n` +
+        `Stage: ${alert.stage}\n` +
+        `Claim: ${alert.claim}\n` +
+        `Confidence: ${alert.composite_confidence.toFixed(2)}\n` +
+        `price_z_score: ${alert.price_z_score.toFixed(2)}\n` +
+        `volume_z_score: ${alert.volume_z_score.toFixed(2)}\n`;
+
+      // Send concurrently, not sequentially - independent deliveries,
+      // one slow/failed send shouldn't hold up the others.
+      const results = await Promise.all(
+        recipients.map((r) => emailDelivery.send(r.email, subject, body))
       );
+      const actuallySent = results.filter(Boolean).length;
+      deliveredCount += actuallySent;
+
+      if (actuallySent > 0) {
+        console.log(
+          `[fanout-svc] EMAILED (${stageLabel}) ${actuallySent}/${recipients.length} subscriber(s) for ${alert.ticker}: "${alert.human_summary}"`
+        );
+      }
+      if (actuallySent < recipients.length) {
+        // Some (or all, if SMTP is unconfigured) didn't actually send -
+        // log what WOULD have gone out, same visibility the old stub
+        // gave, so this is never silently invisible either way.
+        console.log(
+          `[fanout-svc] (${recipients.length - actuallySent} not delivered - SMTP unconfigured or send failed) ` +
+            `would-be recipients: ${recipients.map((r) => r.email).join(", ")}`
+        );
+      }
     } else {
       console.log(
         `[fanout-svc] alert (${alert.stage}) on ${alert.ticker} didn't meet any subscriber's own threshold or debounce`
