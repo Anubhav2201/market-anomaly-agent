@@ -1287,6 +1287,54 @@ config) - not yet deployed or tested against a live Firebase project.
 
 
 
+## ADR-028: Full alert tracing tool + honest scalability assessment
+
+**Context:** wanted to confirm, before making any public claim about it,
+whether "full audit trail" and "scales well" were actually true of this
+system or just architecturally plausible-sounding. Built a concrete
+tool rather than asserting either.
+
+**Event tracing - confirmed real, not just architecturally implied.**
+`FirestoreEventStore` already stores every event in one flat collection
+keyed by `event_id`, with explicit cross-references
+(`anomaly_event_id`, `explanation_event_id`, `cited_event_ids`) - this
+was already true, just never had a dedicated tool exercising it.
+New `src/scripts/traceAlert.ts` walks any `AlertReady` backward through
+its full causal chain: the anomaly that triggered it, the explanation
+that resolved it, and the full resolved content (not just ids) of
+every cited news article or sentiment snapshot. Usage:
+`npx tsx src/scripts/traceAlert.ts <alert_event_id>` or
+`--ticker BTC-USD` for the most recent alert on a ticker.
+
+**Scalability - a genuinely mixed, honestly-stated picture, not a
+blanket "yes":**
+- **Scales well:** `agent-svc`, `grounding-svc`, `fanout-svc` are
+  stateless and horizontally scale on Cloud Run without changes.
+  Firestore lookups are O(1) per document regardless of collection
+  size (confirmed by the trace tool's own design - tracing a 5-event
+  chain costs exactly 5 reads whether the store holds a thousand
+  events or ten million). The cost/latency work already done (ADR-023,
+  ADR-024) - cooldowns, multi-layer caching, prompt caching, tiered
+  model routing, two-stage fan-out - are all real scalability levers,
+  not just cost optimizations: they reduce the marginal work per
+  anomaly as volume grows, which is the actual scalability question.
+- **Known, deliberately-deferred limitation:** `detector-svc` holds its
+  EWMA/MAD baseline state in-memory per ticker (see ADR-010) and is
+  capped at `max-instances=1` - it does NOT currently scale
+  horizontally. Properly sharding baseline state across instances
+  (e.g. consistent hashing so all ticks for one ticker land on the same
+  instance) is a real, known gap, not something to claim is already
+  solved.
+
+**Status:** `traceAlert.ts` implemented and typechecked clean.
+Scalability claims should reference this honest split (stateless
+services scale now; detector-svc's single-instance constraint is a
+known, named limitation) rather than a blanket "the system scales."
+
+---
+
+
+
 ## Deferred / not yet built (tracked, not forgotten)
 
 - **v2 backtesting batch layer** - replay EWMA/MAD against historical
