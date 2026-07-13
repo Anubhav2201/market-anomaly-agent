@@ -7,6 +7,17 @@
  * sensitive) threshold actually get crossed by this specific anomaly's
  * z-scores? Only subscribers whose own bar is met receive the alert.
  *
+ * TWO-STAGE FAN-OUT: an anomaly now produces up to two AlertReady events
+ * sharing the same anomaly_event_id - "investigating" (published by
+ * agent-svc the instant an anomaly is tiered, before any news/sentiment
+ * fetch or Claude call) and "final" (published once the real
+ * explanation + grounding complete). This service delivers BOTH as
+ * separate notifications to a matching subscriber: a fast "we're
+ * looking into it" the moment the anomaly is detected, followed by the
+ * real explanation once it's ready - so subscribers see something
+ * immediately instead of waiting out however long the retry loop takes
+ * for a large-tier anomaly (can be 10+ seconds).
+ *
  * DELIVERY IS STUBBED: this logs who WOULD receive the alert rather
  * than actually sending email/push/SMS - wiring a real delivery channel
  * (e.g. SendGrid, FCM) is a clean next step that plugs in right here
@@ -15,7 +26,11 @@
  * Also enforces PER-SUBSCRIBER debounce (separate from detector-svc's
  * ticker-level debounce) - a subscriber with a longer debounce window
  * than the most-sensitive one shouldn't get spammed just because a more
- * sensitive subscriber's threshold allows frequent triggers.
+ * sensitive subscriber's threshold allows frequent triggers. Debounce
+ * is keyed by TIME, but a "final" alert that's a follow-up to an
+ * "investigating" alert for the SAME anomaly always bypasses it - the
+ * debounce is meant to space out genuinely different anomalies, not
+ * suppress the natural two-stage delivery of one.
  */
 import express from "express";
 import { SubscriptionsStore } from "../../../src/subscriptions/subscriptionsStore";
@@ -24,11 +39,16 @@ import { parsePushMessage } from "../../../shared/pubsub";
 
 const subscriptionsStore = new SubscriptionsStore();
 
-// Per-subscriber last-delivered timestamp, in memory. NOTE: resets on
+interface DeliveryRecord {
+  timestamp: number;
+  anomalyEventId: string;
+}
+
+// Per-subscriber last-delivered record, in memory. NOTE: resets on
 // cold start/redeploy, same acceptable tradeoff as grounding-svc's
 // news-volume tracker - worth persisting to Firestore in a later pass
 // if under-delivery on redeploy becomes a real problem at higher volume.
-const lastDeliveredAt: Map<string, number> = new Map();
+const lastDelivered: Map<string, DeliveryRecord> = new Map();
 
 const app = express();
 app.use(express.json());
@@ -49,9 +69,14 @@ app.post("/pubsub/push", async (req, res) => {
   try {
     processedCount++;
 
-    if (!alert.structurally_grounded) {
+    // The structural-grounding gate only makes sense for "final" alerts -
+    // an "investigating" alert is ALWAYS structurally_grounded: false by
+    // construction (nothing has been grounded yet, there's no
+    // explanation to ground), and that's expected, not a reason to skip
+    // fan-out for it.
+    if (alert.stage === "final" && !alert.structurally_grounded) {
       console.log(
-        `[fanout-svc] skipping fan-out for ungrounded alert on ${alert.ticker}`
+        `[fanout-svc] skipping fan-out for ungrounded final alert on ${alert.ticker}`
       );
       res.status(200).send();
       return;
@@ -71,23 +96,35 @@ app.post("/pubsub/push", async (req, res) => {
         alert.volume_z_score >= sub.volume_z_threshold;
       if (!meetsThreshold) continue;
 
-      const last = lastDeliveredAt.get(sub.subscription_id) ?? 0;
-      if (alert.timestamp - last < sub.debounce_ms) continue;
+      const last = lastDelivered.get(sub.subscription_id);
+      const isFollowUpForSameAnomaly = last?.anomalyEventId === alert.anomaly_event_id;
 
-      lastDeliveredAt.set(sub.subscription_id, alert.timestamp);
+      // Debounce applies only when this is a genuinely different anomaly
+      // from the last one delivered to this subscriber - a "final" alert
+      // following up on an "investigating" alert for the SAME anomaly
+      // always gets through, regardless of how little time has passed.
+      if (!isFollowUpForSameAnomaly && last && alert.timestamp - last.timestamp < sub.debounce_ms) {
+        continue;
+      }
+
+      lastDelivered.set(sub.subscription_id, {
+        timestamp: alert.timestamp,
+        anomalyEventId: alert.anomaly_event_id,
+      });
       recipients.push(sub.user_id);
     }
 
     if (recipients.length > 0) {
       deliveredCount += recipients.length;
       // STUB: replace with real delivery (email/push/SMS) here.
+      const stageLabel = alert.stage === "investigating" ? "INVESTIGATING" : "FINAL";
       console.log(
-        `[fanout-svc] DELIVER to ${recipients.length} subscriber(s) for ${alert.ticker}: ` +
+        `[fanout-svc] DELIVER (${stageLabel}) to ${recipients.length} subscriber(s) for ${alert.ticker}: ` +
           `"${alert.human_summary}" (confidence=${alert.composite_confidence.toFixed(2)}) -> users: ${recipients.join(", ")}`
       );
     } else {
       console.log(
-        `[fanout-svc] alert on ${alert.ticker} didn't meet any subscriber's own threshold or debounce`
+        `[fanout-svc] alert (${alert.stage}) on ${alert.ticker} didn't meet any subscriber's own threshold or debounce`
       );
     }
 

@@ -79,6 +79,7 @@ async function publishSkippedAlert(
     composite_confidence: 0,
     price_z_score: anomaly.price_z_score,
     volume_z_score: anomaly.volume_z_score,
+    stage: "final", // small tier never gets an "investigating" stage - this IS the only alert
   };
   await store.append(alert);
   await publishEvent(ALERTS_TOPIC, alert);
@@ -244,7 +245,50 @@ app.post("/pubsub/push", async (req, res) => {
       return;
     }
 
-    const allNews = await newsCache.getRecentNews(anomaly.ticker, 10);
+    // Two-stage fan-out: publish a fast, raw "investigating" alert RIGHT
+    // NOW, before any news/sentiment fetch or Claude call - this is what
+    // makes the system feel responsive even though the real explanation
+    // can take several seconds (or, for a large-tier anomaly working
+    // through the retry loop, tens of seconds). The enriched "final"
+    // alert (published later, either below via the deterministic skip,
+    // or downstream in grounding-svc) carries the SAME anomaly_event_id,
+    // so fanout-svc treats it as a follow-up update, not a duplicate -
+    // see the stage handling in fanout-svc/src/index.ts.
+    const investigatingAlert: AlertReady = {
+      type: "AlertReady",
+      event_id: uuidv4(),
+      ticker: anomaly.ticker,
+      timestamp: Date.now(),
+      anomaly_event_id: anomaly.event_id,
+      explanation_event_id: "", // no explanation yet - this IS the point
+      claim: "investigating",
+      human_summary: `${anomaly.ticker} moved (price_z=${anomaly.price_z_score.toFixed(
+        2,
+      )}, volume_z=${anomaly.volume_z_score.toFixed(2)}) - looking into the cause now.`,
+      structurally_grounded: false, // nothing to ground yet - meaningless at this stage
+      composite_confidence: 0,
+      price_z_score: anomaly.price_z_score,
+      volume_z_score: anomaly.volume_z_score,
+      stage: "investigating",
+    };
+    await store.append(investigatingAlert);
+    await publishEvent(ALERTS_TOPIC, investigatingAlert);
+    console.log(
+      `[agent-svc] published INVESTIGATING alert for ${anomaly.ticker} (tier=${tier}) - enrichment in progress`,
+    );
+
+    // News and sentiment are fully independent fetches (different APIs,
+    // no data dependency between them) - run them concurrently instead
+    // of sequentially. Shaves a real chunk of latency off every single
+    // anomaly, since this was previously two separate awaited round
+    // trips stacked one after another for no reason.
+    const [allNews, sentimentSnapshots] = await Promise.all([
+      newsCache.getRecentNews(anomaly.ticker, 10),
+      Promise.all([
+        sentimentIngestion.getSnapshot(anomaly.ticker),
+        sentimentIngestion.getMarketSnapshot(),
+      ]),
+    ]);
     const candidateNews: NewsArticleIngested[] = allNews.filter(
       (n) => n.timestamp <= anomaly.timestamp,
     );
@@ -253,13 +297,6 @@ app.post("/pubsub/push", async (req, res) => {
     // so re-appending here would just be redundant Firestore writes.
     // See src/news/newsCache.ts.
 
-    // Fetch sentiment ONCE here (not per-retry-attempt, see
-    // explainWithRetries) - also lets us check below whether there's
-    // ANYTHING at all to reason about before paying for a Claude call.
-    const sentimentSnapshots = await Promise.all([
-      sentimentIngestion.getSnapshot(anomaly.ticker),
-      sentimentIngestion.getMarketSnapshot(),
-    ]);
     const resolvedSentiment = sentimentSnapshots.filter(
       (s): s is NonNullable<typeof s> => s !== null,
     );

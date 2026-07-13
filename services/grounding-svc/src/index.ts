@@ -100,6 +100,7 @@ app.post("/pubsub/push", async (req, res) => {
           composite_confidence: 0,
           price_z_score: anomaly.price_z_score,
           volume_z_score: anomaly.volume_z_score,
+          stage: "final" as const,
         };
         await store.append(alert);
         await publishEvent(ALERTS_TOPIC, alert);
@@ -249,6 +250,7 @@ app.post("/pubsub/push", async (req, res) => {
         composite_confidence: confidence.score,
         price_z_score: anomaly.price_z_score,
         volume_z_score: anomaly.volume_z_score,
+        stage: "final" as const,
       };
       await store.append(alert);
       await publishEvent(ALERTS_TOPIC, alert);

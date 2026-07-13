@@ -114,6 +114,18 @@ export interface AlertReady extends BaseEvent {
   composite_confidence: number;
   price_z_score: number;
   volume_z_score: number;
+  /**
+   * Two-stage fan-out (see DECISIONS.md): "investigating" is a fast,
+   * raw alert published the moment an anomaly is tiered - BEFORE any
+   * news/sentiment fetch or Claude call - so subscribers see something
+   * immediately instead of waiting out the full pipeline (which can
+   * take 10+ seconds for a large-tier anomaly working through the
+   * retry loop). "final" is the enriched alert published once the
+   * explanation + grounding actually complete. Both share the same
+   * anomaly_event_id, so fanout-svc treats "final" as an update to the
+   * same anomaly, not a duplicate alert.
+   */
+  stage: "investigating" | "final";
 }
 
 /**
